@@ -1,0 +1,29 @@
+# secrets — never commit
+.env
+*.pem
+*.key
+
+# data & models (DVC/HF Hub own these)
+data/
+outputs/
+mlruns/
+*.gguf
+*.safetensors
+*.bin
+*.ckpt
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+myvenv/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/
+
+*.egg-info/
