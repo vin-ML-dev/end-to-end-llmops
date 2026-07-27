@@ -4,7 +4,7 @@
 *.key
 
 # data & models (DVC/HF Hub own these)
-data/
+/data/
 outputs/
 mlruns/
 *.gguf
