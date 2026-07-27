@@ -1,0 +1,147 @@
+schema: '2.0'
+stages:
+  ingest:
+    cmd: python -m src.data.ingest
+    deps:
+    - path: src/data/ingest.py
+      hash: md5
+      md5: 5d221a0a14bfc147f11f5473320d5810
+      size: 6686
+    params:
+      params.yaml:
+        data:
+          raw_dir: data/raw
+          interim_dir: data/interim
+          processed_dir: data/processed
+          golden_path: data/golden/golden_set.jsonl
+        openorca:
+          repo_id: Open-Orca/OpenOrca
+          split: train
+          streaming: true
+          max_docs: 5000
+          shuffle_buffer: 0
+          seed: 42
+          keep_submixes:
+          - flan
+          - t0
+          - niv
+          - cot
+        source_mode: openorca
+    outs:
+    - path: data/interim/ingested.jsonl
+      hash: md5
+      md5: faa547c85ebb889192a8d6aef7f24582
+      size: 9574096
+  curate:
+    cmd: python -m src.data.curate
+    deps:
+    - path: data/interim/ingested.jsonl
+      hash: md5
+      md5: faa547c85ebb889192a8d6aef7f24582
+      size: 9574096
+    - path: src/data/curate.py
+      hash: md5
+      md5: 7bbae93fa9a4ec92e77d6364421e61a6
+      size: 9936
+    - path: src/data/quality_filters.py
+      hash: md5
+      md5: 453005298a1592bafc8f007b420ac180
+      size: 6267
+    params:
+      params.yaml:
+        curation:
+          near_dup_threshold: 0.92
+          pii_enabled: true
+        quality:
+          min_question_words: 3
+          max_question_words: 1200
+          min_answer_words: 5
+          max_answer_words: 800
+          min_mean_word_len: 2.5
+          max_mean_word_len: 12.0
+          min_stopwords: 2
+          max_top_ngram_ratio: 0.25
+          max_caps_ratio: 0.4
+          max_symbol_word_ratio: 0.2
+          max_question_echo_ratio: 0.9
+          reject_refusals: true
+          reject_truncated: true
+          blocklist_hits_allowed: 0
+    outs:
+    - path: data/interim/curated.jsonl
+      hash: md5
+      md5: 1f7bad34ff08acc726458129e9b8c74c
+      size: 6295957
+    - path: data/interim/curation_report.json
+      hash: md5
+      md5: ce34e07d43ab67142381a2ac30f8bb8f
+      size: 1771
+  build:
+    cmd: python -m src.data.build_dataset
+    deps:
+    - path: data/interim/curated.jsonl
+      hash: md5
+      md5: 1f7bad34ff08acc726458129e9b8c74c
+      size: 6295957
+    - path: src/data/build_dataset.py
+      hash: md5
+      md5: 35125401a99e4a175d8175b8341f497a
+      size: 2906
+    params:
+      params.yaml:
+        split.seed: 42
+        system_prompt: "You are DomainBot, a helpful and precise assistant. Answer
+          the user's question accurately and concisely. Think through the problem
+          when it requires reasoning, and say plainly when you do not know something
+          rather than guessing.\n"
+    outs:
+    - path: data/interim/dataset_full.jsonl
+      hash: md5
+      md5: 8f4780cb3a92d97ffc57445d92c848ba
+      size: 6660744
+  validate:
+    cmd: python -m src.data.validate
+    deps:
+    - path: data/interim/dataset_full.jsonl
+      hash: md5
+      md5: 8f4780cb3a92d97ffc57445d92c848ba
+      size: 6660744
+    - path: src/data/validate.py
+      hash: md5
+      md5: c653fd5c6b2342f7f1e06e54f34a20c0
+      size: 3965
+  split:
+    cmd: python -m src.data.split
+    deps:
+    - path: data/interim/dataset_full.jsonl
+      hash: md5
+      md5: 8f4780cb3a92d97ffc57445d92c848ba
+      size: 6660744
+    - path: src/data/split.py
+      hash: md5
+      md5: e37783342461950eed30cff7934f92ee
+      size: 7760
+    params:
+      params.yaml:
+        split:
+          train: 0.85
+          val: 0.1
+          test: 0.05
+          seed: 42
+    outs:
+    - path: data/processed/dataset_stats.json
+      hash: md5
+      md5: 2e1e072cbd93b5fa8b43055b2bc2b0f1
+      size: 264
+    - path: data/processed/test.jsonl
+      hash: md5
+      md5: a8896a58773ae3293630ac056e2a25f8
+      size: 337807
+    - path: data/processed/train.jsonl
+      hash: md5
+      md5: f946ec0d0b29006e61dbff325645d426
+      size: 5652623
+    - path: data/processed/val.jsonl
+      hash: md5
+      md5: 1c05be807f3fe3b9e61fd2b036729618
+      size: 670314

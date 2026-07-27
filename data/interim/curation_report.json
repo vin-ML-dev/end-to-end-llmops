@@ -1,0 +1,86 @@
+{
+  "source_mode": "openorca",
+  "input_records": 5000,
+  "kept": 3498,
+  "survival_rate": 0.7,
+  "drops": {
+    "answer_length": 405,
+    "blocklist": 11,
+    "exact_dup": 107,
+    "mean_word_length": 4,
+    "near_dup": 4,
+    "not_english": 168,
+    "question_echo": 473,
+    "question_length": 78,
+    "refusal": 30,
+    "repetition": 59,
+    "truncated": 163
+  },
+  "records_with_pii_scrubbed": 2736,
+  "pii_entities_found": {
+    "PERSON": 2970,
+    "NRP": 1605,
+    "LOCATION": 2233,
+    "DATE_TIME": 2268,
+    "URL": 222,
+    "US_DRIVER_LICENSE": 83,
+    "EMAIL_ADDRESS": 8,
+    "PHONE_NUMBER": 23,
+    "US_BANK_NUMBER": 12,
+    "US_PASSPORT": 6,
+    "US_SSN": 5,
+    "US_ITIN": 1,
+    "IP_ADDRESS": 5
+  },
+  "categories_kept": {
+    "niv": 255,
+    "flan": 2024,
+    "t0": 922,
+    "cot": 297
+  },
+  "drops_by_category": {
+    "cot": {
+      "truncated": 27,
+      "answer_length": 10,
+      "question_echo": 17,
+      "refusal": 2,
+      "exact_dup": 4,
+      "repetition": 1
+    },
+    "flan": {
+      "question_echo": 123,
+      "blocklist": 6,
+      "answer_length": 44,
+      "not_english": 140,
+      "exact_dup": 101,
+      "truncated": 45,
+      "repetition": 19,
+      "question_length": 32,
+      "refusal": 20,
+      "near_dup": 2,
+      "mean_word_length": 2
+    },
+    "niv": {
+      "repetition": 11,
+      "truncated": 41,
+      "not_english": 27,
+      "answer_length": 65,
+      "question_echo": 19,
+      "refusal": 3,
+      "mean_word_length": 2,
+      "question_length": 1
+    },
+    "t0": {
+      "question_echo": 314,
+      "answer_length": 286,
+      "truncated": 50,
+      "question_length": 45,
+      "repetition": 28,
+      "refusal": 5,
+      "blocklist": 5,
+      "exact_dup": 2,
+      "not_english": 1,
+      "near_dup": 2
+    }
+  }
+}

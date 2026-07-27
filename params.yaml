@@ -1,0 +1,68 @@
+# Single source of truth for all pipeline settings.
+# Rule: no hardcoded values in code — everything configurable lives here.
+
+# ---------------------------------------------------------------------------
+# SOURCE MODE
+#   openorca -> stream Open-Orca/OpenOrca from HF (4.2M instruction pairs, MIT)
+#   local_kb -> read curated Q/A JSONL from data/raw/ (your own domain data)
+#   sample   -> bundled OpenOrca-format sample (offline dev, no network)
+# ---------------------------------------------------------------------------
+source_mode: openorca
+
+openorca:
+  repo_id: Open-Orca/OpenOrca
+  split: train
+  streaming: true          # MANDATORY: the full dataset is ~4.2M rows
+  max_docs: 5000           # how many raw rows to pull this run
+  shuffle_buffer: 0    # streaming shuffle buffer (0 = take head, biased)
+  seed: 42
+  # OpenOrca ids look like "flan.2000000", "t0.1000", "niv.123", "cot.456".
+  # The prefix is the FLAN submix -> we use it as the stratification category.
+  keep_submixes: [flan, t0, niv, cot]
+
+data:
+  raw_dir: data/raw
+  interim_dir: data/interim
+  processed_dir: data/processed
+  golden_path: data/golden/golden_set.jsonl
+
+# ---------------------------------------------------------------------------
+# INSTRUCTION-PAIR QUALITY FILTERS
+# OpenOrca is machine-generated at scale: it contains refusals, truncated
+# answers, question echoes, degenerate repetition and template artifacts.
+# Every threshold here throws data away — tune from curation_report.json,
+# not by guessing.
+# ---------------------------------------------------------------------------
+quality:
+  min_question_words: 3
+  max_question_words: 1200
+  min_answer_words: 5
+  max_answer_words: 800
+  min_mean_word_len: 2.5
+  max_mean_word_len: 12.0
+  min_stopwords: 2                # crude English check
+  max_top_ngram_ratio: 0.25       # degenerate repetition
+  max_caps_ratio: 0.40
+  max_symbol_word_ratio: 0.20
+  max_question_echo_ratio: 0.90   # answer that just restates the question
+  reject_refusals: true           # "As an AI language model, I cannot..."
+  reject_truncated: true          # answer ends mid-sentence
+  blocklist_hits_allowed: 0
+
+curation:
+  near_dup_threshold: 0.92        # jaccard on 3-gram shingles of the question
+  pii_enabled: true
+
+split:
+  train: 0.85
+  val: 0.10
+  test: 0.05
+  seed: 42
+
+# We standardize on ONE system prompt rather than keeping OpenOrca's ~ dozens.
+# Rationale in DECISIONS.md (ADR-005): a product has one persona, and Day 4
+# injects this prompt server-side so clients cannot override it.
+system_prompt: >
+  You are DomainBot, a helpful and precise assistant. Answer the user's question
+  accurately and concisely. Think through the problem when it requires reasoning,
+  and say plainly when you do not know something rather than guessing.

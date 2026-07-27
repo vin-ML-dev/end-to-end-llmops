@@ -1,0 +1,56 @@
+stages:
+  ingest:
+    cmd: python -m src.data.ingest
+    deps:
+      - src/data/ingest.py
+    params:
+      - data
+      - source_mode
+      - openorca
+    outs:
+      - data/interim/ingested.jsonl
+
+  curate:
+    cmd: python -m src.data.curate
+    deps:
+      - src/data/curate.py
+      - src/data/quality_filters.py
+      - data/interim/ingested.jsonl
+    params:
+      - curation
+      - quality
+    outs:
+      - data/interim/curated.jsonl
+      - data/interim/curation_report.json:
+          cache: false
+
+  build:
+    cmd: python -m src.data.build_dataset
+    deps:
+      - src/data/build_dataset.py
+      - data/interim/curated.jsonl
+    params:
+      - system_prompt
+      - split.seed
+    outs:
+      - data/interim/dataset_full.jsonl
+
+  validate:
+    cmd: python -m src.data.validate
+    deps:
+      - src/data/validate.py
+      - data/interim/dataset_full.jsonl
+
+  split:
+    cmd: python -m src.data.split
+    deps:
+      - src/data/split.py
+      - data/interim/dataset_full.jsonl
+    params:
+      - split
+    outs:
+      - data/processed/train.jsonl
+      - data/processed/val.jsonl
+      - data/processed/test.jsonl
+      - data/processed/dataset_stats.json:
+          cache: false

@@ -1,0 +1,18 @@
+{
+  "total": 3502,
+  "splits": {
+    "train": 2975,
+    "val": 351,
+    "test": 176
+  },
+  "categories": {
+    "cot": 297,
+    "flan": 2024,
+    "honesty": 4,
+    "niv": 255,
+    "t0": 922
+  },
+  "avg_answer_chars": 866.1,
+  "leakage_checked": true,
+  "seed": 42
+}
