@@ -1,0 +1,65 @@
+# Day 2 — QLoRA fine-tuning config.
+# Every knob lives here so a run is reproducible from (code + data version + this file).
+# Change nothing in the .py files to run an experiment — copy this file and edit.
+
+experiment_name: domainbot-qlora        # MLflow experiment
+run_name: baseline                      # override per experiment (baseline / more_epochs / rank32)
+
+model:
+  # Base model selection (see ADR-007): small, permissive license, strong for size.
+  #   Qwen/Qwen2.5-0.5B-Instruct  -> fits a free Colab T4 easily, fastest
+  #   Qwen/Qwen2.5-1.5B-Instruct  -> better quality, still fits 16GB with QLoRA
+  base_model: Qwen/Qwen2.5-0.5B-Instruct
+  trust_remote_code: false
+
+data:
+  train_path: data/processed/train.jsonl
+  val_path: data/processed/val.jsonl
+  max_seq_length: 1024                   # OOM lever #1: lower this first
+
+# ---------------------------------------------------------------------------
+# QLoRA: 4-bit quantized base + trainable LoRA adapters.
+# The base model is frozen and loaded in 4-bit; only the small LoRA matrices train.
+# ---------------------------------------------------------------------------
+quantization:
+  load_in_4bit: true
+  bnb_4bit_quant_type: nf4               # NF4 = normal-float 4-bit, best for weights
+  bnb_4bit_use_double_quant: true        # quantize the quantization constants too
+  # compute dtype is chosen automatically at runtime: bf16 on Ampere+, else fp16
+
+lora:
+  r: 16                                  # rank — capacity of the adapter (experiment knob)
+  alpha: 32                              # scaling; common rule alpha = 2*r
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  bias: none
+
+training:
+  output_dir: outputs/adapters
+  num_train_epochs: 3
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4         # effective batch = 4 * 4 = 16 (OOM lever #2)
+  learning_rate: 2.0e-4
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  gradient_checkpointing: true           # OOM lever #3: trades compute for memory
+  logging_steps: 5
+  eval_strategy: epoch                   # evaluate on val at each epoch
+  save_strategy: epoch
+  save_total_limit: 2
+  load_best_model_at_end: true
+  metric_for_best_model: eval_loss
+  greater_is_better: false
+  early_stopping_patience: 2             # stop if eval_loss doesn't improve for 2 evals
+  seed: 42
+  report_to: mlflow                      # experiment tracking (falls back cleanly if absent)
+
+# Sanity prompts run after training and logged as an artifact — the qualitative
+# "vibe check" that eval_loss alone can't give you.
+eval_prompts:
+  - "A train travels 150 km in 3 hours. What is its average speed?"
+  - "What is the capital of Japan?"
+  - "Rewrite in passive voice: 'The team finished the project.'"
+  - "What will the stock market do tomorrow?"
+  - "Summarize in one sentence: solar and wind power have become cheaper than fossil fuels in many regions."
