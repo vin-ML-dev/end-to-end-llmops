@@ -4,8 +4,9 @@
 > A complete LLM lifecycle on Kubernetes with CI/CD, caching, A/B rollout,
 > observability, and automated retraining.
 
-**Status:** 🚧 Day 2/10 — QLoRA fine-tuning complete
+**Status:** 🚧 Day 2/10 — QLoRA fine-tuning complete (winning model merged + pushed to HF Hub)
 **Dataset:** [`Open-Orca/OpenOrca`](https://huggingface.co/datasets/Open-Orca/OpenOrca) — ~4.2M GPT-3.5/GPT-4 instruction pairs over FLAN prompts (MIT)
+**Base model:** `Qwen/Qwen2.5-1.5B-Instruct` (Apache-2.0)
 
 ---
 
@@ -16,7 +17,9 @@ _(diagram lands Day 5)_
 ```
 OpenOrca (stream) → quality filters → PII scrub → dedup → chat format → train/val/test
                           ↓                                                    ↓
-                  curation_report.json                            (Day 2: QLoRA fine-tune)
+                  curation_report.json                          QLoRA fine-tune (MLflow)
+                                                                             ↓
+                                                          merge adapter → push to HF Hub
 ```
 
 ## Quickstart
@@ -38,7 +41,7 @@ is the same work you'd do on production logs.
 Its `id` prefixes (`flan.`, `t0.`, `niv.`, `cot.`) are the FLAN submixes, which we
 use as **stratification categories** so every split contains every task family.
 
-## Results (sample mode, 24 rows)
+## Results — Day 1 data pipeline (sample mode, 24 rows)
 
 | Metric | Value |
 |---|---|
@@ -63,26 +66,29 @@ use as **stratification categories** so every split contains every task family.
   always answer; without a counterweight a fine-tune confidently invents facts.
 - **Golden set is frozen** — never trained on, never edited to make a model pass,
   only ever grows as production bugs are found.
+- **Known issue (INC-013):** Presidio over-scrubbed non-sensitive entities — city names
+  (LOCATION) and durations (DATE_TIME) were replaced with placeholders that leaked into
+  training answers. This directly caused a model failure (see Day 2 finding below). Fix
+  in a future data iteration: scrub only EMAIL/PHONE/CARD/PERSON, not LOCATION/DATE_TIME.
 
 ## Docs
 
 - [Decisions (ADRs)](DECISIONS.md) — why each tool was chosen, and the tradeoffs
 - [Incidents](INCIDENTS.md) — failures, root causes, preventions
 - [Runbook](RUNBOOK.md) · [Costs](COSTS.md) · [Day 1 notes](docs/theory-day1.md)
-- [COMMANDS.txt](COMMANDS.txt) — every command for Day 1, in order
-
-
+- [COMMANDS.txt](COMMANDS.txt) · [COMMANDS-day2.txt](COMMANDS-day2.txt) — every command, in order
 
 ---
 
 ## Day 2 — QLoRA fine-tuning + MLflow
 
-Fine-tune `Qwen2.5-0.5B-Instruct` on the Day 1 dataset using **QLoRA** (4-bit NF4
+Fine-tune `Qwen2.5-1.5B-Instruct` on the Day 1 dataset using **QLoRA** (4-bit NF4
 base + LoRA adapters, ~1-3% of params trainable), tracked in **MLflow**.
 
 - `configs/train.yaml` — every hyperparameter; run experiments by editing this, not code
 - `src/training/train.py` — 4-bit load → LoRA → SFT → early stopping → save adapter + sample generations → log to MLflow with **data-version + git-SHA lineage**
 - `src/training/compare_runs.py` — comparison table across runs
+- `notebooks/v2_qlora_finetune_runpod_final.ipynb` — interactive RunPod version (train → merge → push to HF Hub)
 
 Run (on a GPU box):
 ```bash
@@ -92,17 +98,32 @@ make mlflow-ui        # http://localhost:5000
 ```
 
 **Three deliberate experiments** (simulating future retrains): baseline · more epochs +
-lower LR · higher LoRA rank. Winner chosen by eval_loss **and** a read of
-`sample_generations.json` — eval_loss alone never tells you if answers are actually good.
+lower LR · higher LoRA rank. Winner chosen by eval_loss **and** a read of the actual
+generations — eval_loss alone never tells you if answers are good.
 
-| Run | eval_loss | notes |
-|---|---|---|
-| baseline | _fill in_ | |
-| more_epochs | _fill in_ | |
-| rank32 | _fill in_ | |
+| Run | lora_r | epochs | lr | eval_loss | notes |
+|---|---|---|---|---|---|
+| baseline | 16 | 3 | 2e-4 | 1.3181 | got "capital of Japan" **wrong** (emitted a placeholder) |
+| more_epochs | 16 | 5 | 1e-4 | 1.3174 | early-stopped at epoch 4; best at epoch 2 (overfitting) |
+| **rank32** ✅ | 32 | 3 | 2e-4 | **1.3156** | correct on all prompts; cleanest honesty answer |
 
-> Compute dtype is auto-detected: **bf16** on Ampere+ (RTX 30xx/A100), **fp16** on T4.
+**Key finding:** all three eval_losses landed within **0.003** — statistically tied. The
+generations broke the tie: **baseline was silently broken** on a basic fact ("capital of
+Japan"), which eval_loss never revealed. Selected **rank32** (lowest loss *and* correct on
+every prompt). Lesson: *eval_loss ranks token-prediction, not correctness — always read the
+generations before choosing a model.*
+
+**Overfitting observed:** the `more_epochs` run's validation loss bottomed at epoch 2 then
+rose, so early stopping (patience 2) halted it at epoch 4 and kept the epoch-2 weights.
+More epochs did not help on a dataset this small — a real, defensible finding for the ADR.
+
+> Compute dtype is auto-detected: **bf16** on Ampere+ (RTX A4500/30xx/A100), **fp16** on T4.
 > Hardcoding it is the #1 QLoRA portability crash (INC-008).
+>
+> **Environment note:** on managed GPU pods, `torch` is pinned to the driver's CUDA version —
+> don't reinstall it. torch + transformers + tokenizers + training libs are one matched set,
+> pinned together (INC-009…012). `notebooks/requirements-lock.txt` freezes the working environment
+> so a fresh pod installs in one line.
 
 ## What I'd do differently at 100× scale
 
@@ -111,5 +132,6 @@ _(written Day 10)_
 ## Tech stack
 
 `Python` `HF datasets (streaming)` `DVC` `Presidio` `langdetect` `pydantic` `pytest` `ruff` `pre-commit`
-_(growing daily: PEFT/QLoRA, MLflow, vLLM, FastAPI, Docker, Kubernetes, Helm, Argo CD,
-Terraform, Redis, Prometheus, Grafana)_
+`PEFT/QLoRA` `TRL` `bitsandbytes` `MLflow` `Hugging Face Hub`
+_(growing daily: vLLM, FastAPI, Docker, Kubernetes, Helm, Argo CD, Terraform, Redis,
+Prometheus, Grafana)_
