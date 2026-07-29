@@ -1,0 +1,29 @@
+# Day 3 — evaluation & gate config.
+# The gate decides whether a model is allowed to be published/deployed.
+
+# The model to evaluate: an HF repo id or a local path to a MERGED model.
+model: vinmlops/domainbot-1.5b-rank32          # <- your Day 2 winner on the Hub
+
+# Currently-deployed model to compare against (the "champion").
+# Leave null on the first run (no champion yet); set it once you have a prod model.
+baseline_model: null
+
+golden_path: data/golden/golden_set.jsonl
+
+generation:
+  max_new_tokens: 200
+  temperature: 0.0          # deterministic — a gate must be reproducible
+  system_prompt: >
+    You are DomainBot, a helpful and precise assistant. Answer accurately and
+    concisely, and say when you don't know.
+
+# ---------------------------------------------------------------------------
+# GATE THRESHOLDS — all must pass for the model to be APPROVED.
+# ---------------------------------------------------------------------------
+gate:
+  min_pass_rate: 0.80            # absolute floor: >=80% of golden cases pass
+  min_vs_baseline: 0.0          # relative: new must be >= baseline (no regressions)
+  # per-category floor: no single task family may collapse, even if overall passes
+  min_category_pass_rate: 0.50
+
+report_dir: outputs/eval

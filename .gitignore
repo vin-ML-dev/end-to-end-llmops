@@ -27,3 +27,5 @@ myvenv/
 .vscode/
 
 *.egg-info/
+eval_report.json
+outputs/

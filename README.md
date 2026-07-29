@@ -4,7 +4,7 @@
 > A complete LLM lifecycle on Kubernetes with CI/CD, caching, A/B rollout,
 > observability, and automated retraining.
 
-**Status:** 🚧 Day 2/10 — QLoRA fine-tuning complete (winning model merged + pushed to HF Hub)
+**Status:** 🚧 Day 3/10 — evaluation gate passed, model registered `v1.0.0`
 **Dataset:** [`Open-Orca/OpenOrca`](https://huggingface.co/datasets/Open-Orca/OpenOrca) — ~4.2M GPT-3.5/GPT-4 instruction pairs over FLAN prompts (MIT)
 **Base model:** `Qwen/Qwen2.5-1.5B-Instruct` (Apache-2.0)
 
@@ -19,7 +19,7 @@ OpenOrca (stream) → quality filters → PII scrub → dedup → chat format �
                           ↓                                                    ↓
                   curation_report.json                          QLoRA fine-tune (MLflow)
                                                                              ↓
-                                                          merge adapter → push to HF Hub
+                                              merge adapter → push to HF Hub → GATE → register v1.0.0
 ```
 
 ## Quickstart
@@ -76,7 +76,7 @@ use as **stratification categories** so every split contains every task family.
 - [Decisions (ADRs)](DECISIONS.md) — why each tool was chosen, and the tradeoffs
 - [Incidents](INCIDENTS.md) — failures, root causes, preventions
 - [Runbook](RUNBOOK.md) · [Costs](COSTS.md) · [Day 1 notes](docs/theory-day1.md)
-- [COMMANDS.txt](COMMANDS.txt) · [COMMANDS-day2.txt](COMMANDS-day2.txt) — every command, in order
+- [COMMANDS.txt](COMMANDS.txt) · [COMMANDS-day2.txt](COMMANDS-day2.txt) · [COMMANDS-day3.txt](COMMANDS-day3.txt) — every command, in order
 
 ---
 
@@ -125,6 +125,68 @@ More epochs did not help on a dataset this small — a real, defensible finding 
 > pinned together (INC-009…012). `notebooks/requirements-lock.txt` freezes the working environment
 > so a fresh pod installs in one line.
 
+## Day 3 — Evaluation, quality gate, regression suite, registry
+
+The heart of production ML: a gate that can **block a bad model from shipping**, and a model
+registry with versioned, rollback-able releases.
+
+- `src/evaluation/evaluate.py` — pure scoring logic (GPU-free, unit-tested): a golden case passes
+  iff a `must_contain` pattern matches **and** no `must_not_contain` pattern does. The bans make it
+  a **regression suite** — every past hallucination stays permanently forbidden.
+- `src/evaluation/gate.py` — loads the model, runs all golden cases, applies the gate, and
+  **exits non-zero if blocked** (so CI / the retrain pipeline halts). Three conditions, all required:
+  1. **absolute floor** — ≥ 80% pass
+  2. **no regression** — ≥ the currently-deployed model
+  3. **no slice collapse** — no category below 50%
+- `src/evaluation/register.py` — re-runs the gate, then tags the HF repo `v1.0.0` and writes the
+  model card. Refuses to register an unapproved model.
+- `notebooks/day3_evaluation_gate_runpod.ipynb` — interactive RunPod version.
+
+```bash
+make gate-test                         # prove the gate BLOCKS (10 tests, no GPU)
+make gate                              # run it against your model (GPU)
+make register VERSION=v1.0.0           # register only if it passed
+```
+
+### The gate did its job — twice
+
+**Run 1 — BLOCKED at 82%.** Overall pass rate cleared the 80% floor, but the **per-category
+condition caught that `honesty` had collapsed to 33%** (2/3 fail) — exactly the slice failure an
+aggregate-only threshold would have missed.
+
+| category | run 1 | run 2 |
+|---|---|---|
+| cot | 4/5 (80%) | 5/5 |
+| flan | 6/7 (86%) | 7/7 |
+| **honesty** | **1/3 (33%)** ❌ | 3/3 ✅ |
+| niv | 2/2 | 2/2 |
+| t0 | 3/3 | 3/3 |
+| quality | 2/2 | 2/2 |
+| **overall** | 18/22 (82%) **BLOCKED** | **22/22 (100%) APPROVED** |
+
+**The investigation is the lesson.** Reading the failures showed the model's answers were
+*actually correct* — it refused appropriately ("I cannot provide information about your specific
+bank account balance...") — but the golden `must_contain` patterns were too narrow to recognize
+those valid refusals. A few `must_not_contain` bans were also too crude (banning the bare digit
+`"15"`, which appears in the question "15% of 200").
+
+These were **false-positive blocks**: the gate wrongly rejecting a good model, not a bad model
+slipping through. The fix was to **broaden `must_contain` to match semantically-valid refusals**
+and **anchor `must_not_contain` to ban only actual wrong answers** (`"is 30"`, not bare `"30"`).
+Re-ran → **100%, APPROVED legitimately**, and registered `v1.0.0`.
+
+> **This is distinct from editing the golden set to pass a bad model.** Here the model was right
+> and the *tests* were broken. The rule holds: never loosen a test to pass a wrong answer — but
+> fixing a brittle test that rejects a correct answer is correct. The check: *would a human reading
+> this answer call it right?* For the refusals, yes.
+>
+> **Takeaway:** a gate can wrongly **block** good models as well as wrongly **pass** bad ones.
+> Golden-set quality is as important as model quality, and tuning it is real work.
+
+**Registry:** the approved model is tagged `v1.0.0` on the Hub (semantic versioning — MAJOR = new
+base/prompt, MINOR = new data, PATCH = hyperparameters). Rollback later = point serving at a prior
+tag; one line, no retraining.
+
 ## What I'd do differently at 100× scale
 
 _(written Day 10)_
@@ -132,6 +194,6 @@ _(written Day 10)_
 ## Tech stack
 
 `Python` `HF datasets (streaming)` `DVC` `Presidio` `langdetect` `pydantic` `pytest` `ruff` `pre-commit`
-`PEFT/QLoRA` `TRL` `bitsandbytes` `MLflow` `Hugging Face Hub`
+`PEFT/QLoRA` `TRL` `bitsandbytes` `MLflow` `Hugging Face Hub (registry + tags)`
 _(growing daily: vLLM, FastAPI, Docker, Kubernetes, Helm, Argo CD, Terraform, Redis,
 Prometheus, Grafana)_
