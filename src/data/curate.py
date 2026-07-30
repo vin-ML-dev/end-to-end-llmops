@@ -33,14 +33,27 @@ QUALITY_SETTINGS = PARAMS["quality"]
 # Step 2 helper: PII (personal info) scrubbing
 # ---------------------------------------------------------------------------
 
-# Regex patterns as a simple, fast fallback for structured PII
+# We scrub ONLY genuinely sensitive, structured PII: email, phone, credit card,
+# and SSN. We deliberately do NOT scrub locations, dates, nationalities, or
+# person names -- those are legitimate answer content (e.g. "Japan", "Tokyo",
+# "3 hours"). Over-scrubbing them replaced real words with placeholders that
+# leaked into training answers and taught the model to emit "<LOCATION>" instead
+# of "Japan" (INC-013).
 PII_PATTERNS = {
     "EMAIL": re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"),
     "CARD": re.compile(r"\b(?:\d[ -]*?){13,16}\b"),
-    "AADHAAR": re.compile(r"\b\d{4}\s?\d{4}\s?\d{4}\b"),
     "PHONE": re.compile(r"(?:\+?\d{1,3}[\s-]?)?(?:\(?\d{3,5}\)?[\s-]?)?\d{3}[\s-]?\d{4}\b"),
-    "IP": re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
+    "SSN": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
 }
+
+# The matching allow-list for Presidio: only these entity types are scrubbed.
+# LOCATION, DATE_TIME, NRP (nationality), PERSON are intentionally excluded.
+SENSITIVE_ENTITIES = [
+    "EMAIL_ADDRESS",
+    "PHONE_NUMBER",
+    "CREDIT_CARD",
+    "US_SSN",
+]
 
 # Presidio (a proper NER-based PII detector) is loaded lazily, only if needed,
 # since it's slower to start up than plain regex.
@@ -50,7 +63,7 @@ _presidio_anonymizer = None
 
 def scrub_with_regex(text: str) -> tuple[str, list[str]]:
     """Quick fallback: find/replace PII using regex patterns.
-    Good at structured stuff (emails, card numbers), misses names."""
+    Scrubs only email, credit card, phone, and SSN -- not locations/dates/names."""
     found_types = []
     for label, pattern in PII_PATTERNS.items():
         if pattern.search(text):
@@ -60,9 +73,9 @@ def scrub_with_regex(text: str) -> tuple[str, list[str]]:
 
 
 def scrub_pii(text: str) -> tuple[str, list[str]]:
-    """Remove personal info from text. Tries Presidio first (catches names,
-    locations, etc. using NLP) and falls back to regex if Presidio isn't
-    available or fails."""
+    """Remove personal info from text. Tries Presidio first (restricted to the
+    sensitive entity types in SENSITIVE_ENTITIES) and falls back to regex if
+    Presidio isn't available or fails."""
     if not CURATION_SETTINGS["pii_enabled"]:
         return text, []
 
@@ -75,7 +88,9 @@ def scrub_pii(text: str) -> tuple[str, list[str]]:
             _presidio_analyzer = AnalyzerEngine()
             _presidio_anonymizer = AnonymizerEngine()
 
-        results = _presidio_analyzer.analyze(text=text, language="en")
+        # entities=SENSITIVE_ENTITIES is the fix: only look for those sensitive
+        # types, never LOCATION / DATE_TIME / NRP / PERSON.
+        results = _presidio_analyzer.analyze(text=text, entities=SENSITIVE_ENTITIES, language="en")
         if not results:
             return text, []
 
@@ -86,7 +101,7 @@ def scrub_pii(text: str) -> tuple[str, list[str]]:
     except Exception:
         # Presidio isn't installed/working -> fall back to regex.
         # We still report which entity types were found either way, so a
-        # missing PERSON count is visible in the report, not silently hidden.
+        # missing count is visible in the report, not silently hidden.
         return scrub_with_regex(text)
 
 
@@ -233,9 +248,7 @@ def build_report(all_records: list[dict], kept_records: list[dict], stats: dict)
         "records_with_pii_scrubbed": drop_counts["pii_scrubbed"],
         "pii_entities_found": dict(stats["pii_type_counts"]),
         "categories_kept": dict(Counter(r["category"] for r in kept_records)),
-        "drops_by_category": {
-            cat: dict(reasons) for cat, reasons in sorted(stats["drops_by_category"].items())
-        },
+        "drops_by_category": {cat: dict(reasons) for cat, reasons in sorted(stats["drops_by_category"].items())},
     }
 
 
