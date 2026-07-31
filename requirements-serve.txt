@@ -1,0 +1,7 @@
+# Day 4 — gateway serving deps (the GATEWAY, not the engine).
+# The engine (vLLM / llama.cpp) runs as a separate process/container.
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+httpx>=0.27.0
+pydantic>=2.9.0
+pyyaml>=6.0

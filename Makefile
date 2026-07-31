@@ -46,3 +46,21 @@ gate-test:  ## prove the gate blocks (unit tests, no GPU)
 
 register:  ## register an approved model (usage: make register VERSION=v1.0.0)
 	python -m src.evaluation.register --config configs/eval.yaml --version $(VERSION)
+
+# --- Day 4: serving (gateway) ---
+serve-setup:  ## install gateway deps
+	pip install -r requirements-serve.txt
+
+serve:  ## run the gateway locally (engine must be running separately)
+	uvicorn src.serving.app:app --host 0.0.0.0 --port 8000 --reload
+
+serve-test:  ## test the gateway (no engine/GPU needed)
+	pytest tests/test_serving.py -v
+
+docker-build:  ## build the gateway image (tag with git sha)
+	docker build -t domainbot-gateway:$(shell git rev-parse --short HEAD) -t domainbot-gateway:local .
+
+docker-run:  ## run the gateway container
+	docker run --rm -p 8000:8000 \
+	  -e DOMAINBOT_ENGINE_URL=http://host.docker.internal:8001/v1 \
+	  domainbot-gateway:local

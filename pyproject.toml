@@ -1,5 +1,5 @@
 [project]
-name = "end-to-end-llmops"
+name = "domainbot-llmops"
 version = "0.1.0"
 description = "Production LLMOps platform: fine-tune -> gate -> serve -> deploy -> observe -> retrain"
 requires-python = ">=3.10"
@@ -28,7 +28,7 @@ include = ["src*"]
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-extend-exclude = ["notebooks/", "*.ipynb"]
+extend-exclude = ["notebooks", "*.ipynb"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

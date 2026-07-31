@@ -1,0 +1,30 @@
+# Day 4 — serving config. Env vars override every value (12-factor).
+
+model:
+  # The registered model to serve. Pin the REVISION (tag), not just the repo —
+  # "same tag, different weights" is a silent production killer (ADR-013).
+  repo_id: vinmlops/domainbot-1.5b-rank32
+  revision: v1.0.0                 # the tag registered by the Day 3 gate
+  # engine backend URL (OpenAI-compatible). vLLM on GPU, or llama.cpp on CPU.
+  engine_url: http://localhost:8001/v1
+  engine_model_name: domainbot     # name the engine serves under
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  # the ONE system prompt, injected server-side. Clients cannot override it.
+  system_prompt: >
+    You are DomainBot, a helpful and precise assistant. Answer accurately and
+    concisely, and say when you don't know.
+  api_key_env: DOMAINBOT_API_KEY   # required in the Authorization header
+  engine_timeout_s: 30             # upstream timeout -> 504 on exceed
+
+limits:
+  max_prompt_chars: 4000           # reject oversized prompts (DoS guard)
+  max_history_turns: 10            # cap conversation history
+  max_new_tokens: 512              # hard ceiling regardless of client request
+  default_new_tokens: 256
+
+generation:
+  temperature: 0.7
+  top_p: 0.9
