@@ -70,15 +70,6 @@ use as **stratification categories** so every split contains every task family.
 - **PII scrubbing is narrow (INC-013):** only email/phone/card/SSN — never locations, dates, or
   names, which are legitimate answer content. Over-scrubbing once leaked `<LOCATION>` into answers.
 
-## Docs
-
-- [Decisions (ADRs)](DECISIONS.md) — why each tool was chosen, and the tradeoffs
-- [Incidents](INCIDENTS.md) — failures, root causes, preventions
-- [Runbook](RUNBOOK.md) · [Costs](COSTS.md) · [Day 1 notes](docs/theory-day1.md)
-- [COMMANDS.txt](COMMANDS.txt) · [COMMANDS-day2.txt](COMMANDS-day2.txt) · [COMMANDS-day3.txt](COMMANDS-day3.txt) · [COMMANDS-day4.txt](COMMANDS-day4.txt) · [COMMANDS-day5.txt](COMMANDS-day5.txt)
-
-
-
 ---
 
 ## Day 2 — QLoRA fine-tuning + MLflow
