@@ -1,0 +1,13 @@
+# Non-secret config. In THIS architecture the model runs on an EXTERNAL cloud
+# platform — we only have its API endpoint. The gateway calls out to it.
+# The endpoint URL itself is kept in the Secret (15-secret.yaml) because managed
+# endpoints often embed a token or are semi-sensitive; non-sensitive knobs live here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: domainbot-config
+  namespace: domainbot
+data:
+  DOMAINBOT_REVISION: "v1.1.0"                       # for /v1/model-info reporting
+  DOMAINBOT_REPO_ID: "vinmlops/domainbot-1.5b-rank32"
+  DOMAINBOT_ENGINE_TIMEOUT_S: "30"                   # upstream call timeout

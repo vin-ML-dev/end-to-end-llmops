@@ -64,3 +64,20 @@ docker-run:  ## run the gateway container
 	docker run --rm -p 8000:8000 \
 	  -e DOMAINBOT_ENGINE_URL=http://host.docker.internal:8001/v1 \
 	  domainbot-gateway:local
+
+# --- Day 5: Kubernetes ---
+k8s-validate:  ## validate manifests without a cluster
+	pytest tests/test_k8s_manifests.py -v
+	kubectl apply -k k8s/ --dry-run=client >/dev/null && echo "kustomize OK"
+
+k8s-deploy:  ## apply everything to the current cluster
+	kubectl apply -k k8s/
+
+k8s-status:  ## see pods, services, hpa
+	kubectl -n domainbot get pods,svc,hpa
+
+k8s-rollback:  ## undo last gateway rollout
+	./scripts/rollback.sh deploy
+
+k8s-logs:  ## tail gateway logs
+	kubectl -n domainbot logs -l component=gateway -f

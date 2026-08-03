@@ -27,6 +27,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 import yaml
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -36,6 +37,8 @@ from src.serving.schemas import (
     HealthResponse,
     ModelInfo,
 )
+
+load_dotenv()
 
 # --------------------------------------------------------------------------- config
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -48,6 +51,9 @@ def load_config() -> dict:
     cfg["model"]["engine_url"] = os.getenv("DOMAINBOT_ENGINE_URL", cfg["model"]["engine_url"])
     cfg["model"]["revision"] = os.getenv("DOMAINBOT_REVISION", cfg["model"]["revision"])
     cfg["model"]["repo_id"] = os.getenv("DOMAINBOT_REPO_ID", cfg["model"]["repo_id"])
+    # optional auth token for the EXTERNAL model endpoint (managed APIs often need one).
+    # If set, the gateway forwards it as `Authorization: Bearer <key>` on upstream calls.
+    cfg["model"]["engine_api_key"] = os.getenv("DOMAINBOT_ENGINE_API_KEY", "")
     return cfg
 
 
@@ -122,44 +128,11 @@ def build_messages(user_messages: list) -> list[dict]:
     return out
 
 
-def validate_limits(req: ChatRequest) -> ChatRequest:
-    """Enforce size caps with production-grade UX.
-
-    1. If the LATEST user message alone exceeds the per-message cap -> reject 413.
-       (Pydantic already caps each message at 4000 chars, but we re-check here to
-       return an honest 413 tied to the user's actual input, not an opaque 422.)
-    2. If the TOTAL conversation history is too long -> trim oldest messages to fit
-       (sliding window), always keeping the latest user message. The user's current
-       input always goes through; only stale history drops off. This mirrors how
-       ChatGPT/Claude handle long conversations.
-    """
+def validate_limits(req: ChatRequest) -> None:
     limits = CFG["limits"]
-    max_msg = limits.get("max_message_chars", 4000)
-    max_total = limits["max_prompt_chars"]
-
-    # 1. Latest (current) message — the user's actual input this turn.
-    latest = req.messages[-1]
-    if len(latest.content) > max_msg:
-        raise HTTPException(
-            status_code=413,
-            detail="your message is too long — please shorten it",
-        )
-
-    # 2. Total history — trim oldest first, keep newest, never drop the latest turn.
-    total = sum(len(m.content) for m in req.messages)
-    if total <= max_total:
-        return req  # fits as-is
-
-    kept: list = []
-    running = 0
-    for m in reversed(req.messages):  # newest first
-        if running + len(m.content) > max_total and kept:
-            break  # stop before exceeding (but keep at least the latest)
-        kept.insert(0, m)  # rebuild in original order
-        running += len(m.content)
-
-    req.messages = kept
-    return req
+    total_chars = sum(len(m.content) for m in req.messages)
+    if total_chars > limits["max_prompt_chars"]:
+        raise HTTPException(status_code=413, detail="prompt too large")
 
 
 def engine_payload(req: ChatRequest, messages: list[dict], stream: bool) -> dict:
@@ -172,6 +145,13 @@ def engine_payload(req: ChatRequest, messages: list[dict], stream: bool) -> dict
         "top_p": req.top_p if req.top_p is not None else gen["top_p"],
         "stream": stream,
     }
+
+
+def engine_headers() -> dict:
+    """Headers for the upstream (external) model endpoint. If the managed endpoint
+    requires a token, forward it as a Bearer header. Empty key -> no auth header."""
+    key = CFG["model"].get("engine_api_key", "")
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 # --------------------------------------------------------------------------- health
@@ -191,7 +171,7 @@ async def readyz():
     """
     url = CFG["model"]["engine_url"].rstrip("/") + "/models"
     try:
-        r = await app.state.client.get(url, timeout=3)
+        r = await app.state.client.get(url, headers=engine_headers(), timeout=3)
         if r.status_code == 200:
             return HealthResponse(status="ready")
         return JSONResponse(status_code=503, content={"status": "not_ready", "detail": f"engine {r.status_code}"})
@@ -214,7 +194,7 @@ async def model_info():
 # --------------------------------------------------------------------------- chat
 @app.post("/v1/chat", response_model=ChatResponse, dependencies=[Depends(require_api_key)])
 async def chat(req: ChatRequest, request: Request):
-    req = validate_limits(req)
+    validate_limits(req)
     messages = build_messages(req.messages)
     url = CFG["model"]["engine_url"].rstrip("/") + "/chat/completions"
 
@@ -225,8 +205,9 @@ async def chat(req: ChatRequest, request: Request):
         )
 
     payload = engine_payload(req, messages, stream=False)
+
     try:
-        r = await app.state.client.post(url, json=payload)
+        r = await app.state.client.post(url, json=payload, headers=engine_headers())
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="engine timeout") from None
     except httpx.ConnectError:
@@ -248,7 +229,7 @@ async def stream_chat(request: Request, url: str, payload: dict):
     """Proxy the engine's SSE stream to the client, forwarding token deltas."""
     rid = request.state.rid
     try:
-        async with app.state.client.stream("POST", url, json=payload) as r:
+        async with app.state.client.stream("POST", url, json=payload, headers=engine_headers()) as r:
             if r.status_code != 200:
                 yield f'data: {{"error": "engine {r.status_code}"}}\n\n'
                 return

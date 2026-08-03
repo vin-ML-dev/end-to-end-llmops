@@ -1,0 +1,15 @@
+# A Service gives the gateway pods a stable in-cluster name + load-balances across them.
+# Type ClusterIP = internal only; expose externally with Ingress or port-forward.
+apiVersion: v1
+kind: Service
+metadata:
+  name: domainbot-gateway
+  namespace: domainbot
+spec:
+  selector:
+    app: domainbot
+    component: gateway
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP

@@ -14,7 +14,7 @@ openorca:
   split: train
   streaming: true          # MANDATORY: the full dataset is ~4.2M rows
   max_docs: 5000           # how many raw rows to pull this run
-  shuffle_buffer: 0    # streaming shuffle buffer (0 = take head, biased)
+  shuffle_buffer: 10000    # streaming shuffle buffer (0 = take head, biased)
   seed: 42
   # OpenOrca ids look like "flan.2000000", "t0.1000", "niv.123", "cot.456".
   # The prefix is the FLAN submix -> we use it as the stratification category.

@@ -1,0 +1,7 @@
+# A namespace isolates our app's resources from everything else in the cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: domainbot
+  labels:
+    app: domainbot

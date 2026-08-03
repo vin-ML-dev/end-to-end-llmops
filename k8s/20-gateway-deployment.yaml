@@ -1,0 +1,87 @@
+# The GATEWAY deployment — our FastAPI policy layer (CPU-only, tiny, scales easily).
+#
+# ARCHITECTURE: the model runs on an EXTERNAL cloud platform. This gateway is the
+# ONLY thing we run in Kubernetes; it calls out to the external model endpoint
+# (DOMAINBOT_ENGINE_URL, from the Secret) and returns responses to users.
+# There is no engine Deployment in this cluster.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: domainbot-gateway
+  namespace: domainbot
+  labels:
+    app: domainbot
+    component: gateway
+
+spec:
+  replicas: 2 # start with 2 for availability; HPA adjusts
+
+  selector:
+    matchLabels:
+      app: domainbot
+      component: gateway
+
+  template:
+    metadata:
+      labels:
+        app: domainbot
+        component: gateway
+
+    spec:
+      # never run as root (matches the Dockerfile's non-root user)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+
+      containers:
+        - name: gateway
+          image: domainbot-gateway:1.1.0
+          imagePullPolicy: IfNotPresent
+          # image: ghcr.io/vin-ML-dev/domainbot-gateway:1.1.0
+
+          ports:
+            - containerPort: 8000
+
+          # config from ConfigMap, secrets from Secret
+          envFrom:
+            - configMapRef:
+                name: domainbot-config
+            - secretRef:
+                name: domainbot-secrets
+
+          # --- resource requests/limits ---
+          # requests = guaranteed (used for scheduling + HPA math)
+          # limits = hard ceiling (OOM-killed if exceeded)
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+
+          # liveness: is the process alive? fail -> restart the Pod
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+          # readiness: can it serve requests? fail -> stop sending traffic
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+
+          # startup: allow slow startup before liveness checks begin
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            failureThreshold: 30
+            periodSeconds: 2

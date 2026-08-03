@@ -7,7 +7,7 @@ model:
   revision: v1.0.0                 # the tag registered by the Day 3 gate
   # engine backend URL (OpenAI-compatible). vLLM on GPU, or llama.cpp on CPU.
   engine_url: http://localhost:8001/v1
-  engine_model_name: domainbot     # name the engine serves under
+  engine_model_name: vinmlops/domainbot-1.5b-rank32     # name the engine serves under
 
 server:
   host: 0.0.0.0

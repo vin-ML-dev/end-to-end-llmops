@@ -1,0 +1,13 @@
+# PodDisruptionBudget: during voluntary disruptions (node drain, cluster upgrade),
+# keep at least 1 gateway pod running so the service never fully goes down.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: domainbot-gateway
+  namespace: domainbot
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: domainbot
+      component: gateway

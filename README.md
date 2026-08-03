@@ -72,6 +72,15 @@ use as **stratification categories** so every split contains every task family.
   dates, or names, which are legitimate answer content. Over-scrubbing them once leaked
   `<LOCATION>` placeholders into training answers; the fix + full trace is in INCIDENTS.md.
 
+## Docs
+
+- [Decisions (ADRs)](DECISIONS.md) — why each tool was chosen, and the tradeoffs
+- [Incidents](INCIDENTS.md) — failures, root causes, preventions
+- [Runbook](RUNBOOK.md) · [Costs](COSTS.md) · [Day 1 notes](docs/theory-day1.md)
+- [COMMANDS.txt](COMMANDS.txt) · [COMMANDS-day2.txt](COMMANDS-day2.txt) · [COMMANDS-day3.txt](COMMANDS-day3.txt) · [COMMANDS-day4.txt](COMMANDS-day4.txt)
+
+
+
 ---
 
 ## Day 2 — QLoRA fine-tuning + MLflow
