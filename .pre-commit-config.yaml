@@ -4,13 +4,16 @@ repos:
     hooks:
       - id: ruff
         args: [--fix]
+        exclude: '\.ipynb$|^notebooks/'
       - id: ruff-format
+        exclude: '\.ipynb$|^notebooks/'
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        exclude: '^helm/.*/templates/.*'
       - id: check-json
       - id: check-added-large-files
         args: ['--maxkb=1000']

@@ -1,0 +1,24 @@
+# Argo CD Application — GitOps. Argo watches this Git repo and makes the cluster
+# match k8s/. When CI bumps the image tag in kustomization.yaml, Argo detects the
+# change and rolls it out. Deploy = git commit; rollback = git revert. No one runs
+# kubectl by hand, and the cluster state always equals what's in Git (auditable).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: domainbot
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/vin-ML-dev/end-to-end-llmops.git
+    targetRevision: main
+    path: k8s                      # Argo applies everything under k8s/
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: domainbot
+  syncPolicy:
+    automated:
+      prune: true                  # delete resources removed from Git
+      selfHeal: true               # revert manual cluster drift back to Git
+    syncOptions:
+      - CreateNamespace=true

@@ -1,0 +1,25 @@
+# Helm values — the ONE place to configure a deploy. Override per-environment
+# (dev/staging/prod) with -f values-prod.yaml instead of editing templates.
+image:
+  repository: ghcr.io/vin-ML-dev/domainbot-gateway
+  tag: "git-REPLACE"          # CI sets this to git-<sha>
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+model:
+  revision: "v1.1.0"
+  repoId: "vinmlops/domainbot-1.5b-rank32"
+
+# secrets are NOT here — created separately (kubectl/Terraform). Helm references them.
+secretName: domainbot-secrets
+
+resources:
+  requests: { cpu: "100m", memory: "128Mi" }
+  limits:   { cpu: "500m", memory: "256Mi" }
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70

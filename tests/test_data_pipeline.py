@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from src.data.curate import get_shingles, normalize, scrub_with_regex, similarity
-from src.data.ingest import get_category
+from src.data.curate import jaccard, normalize, scrub_pii_regex, shingles
+from src.data.ingest import submix_of
 from src.data.quality_filters import (
     check_pair,
     is_refusal,
@@ -50,24 +50,18 @@ def test_normalize_strips_case_and_punctuation():
 
 
 def test_near_duplicate_detection():
-    a = get_shingles("How many paid leave days do employees get per year")
-    b = get_shingles("How many paid leave days do employees get each year")
-    assert 0.4 < similarity(a, b) < 1.0
+    a = shingles("How many paid leave days do employees get per year")
+    b = shingles("How many paid leave days do employees get each year")
+    assert 0.4 < jaccard(a, b) < 1.0
 
 
 # ------------------------------------------------------------------ submixes
 @pytest.mark.parametrize(
     "row_id,expected",
-    [
-        ("flan.2000000", "flan"),
-        ("t0.1000", "t0"),
-        ("niv.123", "niv"),
-        ("cot.456", "cot"),
-        ("", "unknown"),
-    ],
+    [("flan.2000000", "flan"), ("t0.1000", "t0"), ("niv.123", "niv"), ("cot.456", "cot"), ("", "unknown")],
 )
 def test_submix_extracted_from_openorca_id(row_id, expected):
-    assert get_category(row_id) == expected
+    assert submix_of(row_id) == expected
 
 
 # ------------------------------------------------------------------- filters
@@ -78,7 +72,7 @@ def test_good_pair_passes():
 
 def test_refusal_detected():
     assert is_refusal("As an AI language model, I do not have personal opinions.")
-    ok, reason = check_pair("What do you think?", "As an AI language model, I cannot.", Q)
+    ok, reason = check_pair("What do you think?", "As an AI language model, I cannot provide that opinion.", Q)
     assert not ok and reason == "refusal"
 
 
@@ -112,11 +106,20 @@ def test_short_answer_rejected():
 
 
 # ----------------------------------------------------------------------- PII
-def test_pii_regex_scrubs_email_and_card():
-    text = "Email priya.sharma@example.com, card 4532 1122 3344 5566, ip 192.168.1.1"
-    scrubbed, found = scrub_with_regex(text)
+def test_pii_regex_scrubs_sensitive_only():
+    # After INC-013: scrub email/phone/card/SSN, but NEVER locations or dates.
+    text = "Email priya@example.com, card 4532 1122 3344 5566, SSN 123-45-6789"
+    scrubbed, found = scrub_pii_regex(text)
     assert "@" not in scrubbed
-    assert "EMAIL" in found and "CARD" in found and "IP" in found
+    assert "EMAIL" in found and "CARD" in found and "SSN" in found
+
+
+def test_pii_regex_preserves_locations_and_dates():
+    # the INC-013 regression guard: "Japan"/"Tokyo"/"3 hours" must survive
+    text = "The capital of Japan is Tokyo and it took 3 hours."
+    scrubbed, found = scrub_pii_regex(text)
+    assert scrubbed == text  # unchanged
+    assert found == []
 
 
 # ------------------------------------------------------------- output shapes

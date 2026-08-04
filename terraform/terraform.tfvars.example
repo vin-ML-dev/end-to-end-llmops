@@ -1,0 +1,4 @@
+# copy to terraform.tfvars and fill in (tfvars is gitignored — never commit real values)
+engine_url      = "https://api.runpod.ai/v2/YOUR_ENDPOINT/openai/v1"
+engine_api_key  = "your-runpod-key"
+gateway_api_key = "your-gateway-key"

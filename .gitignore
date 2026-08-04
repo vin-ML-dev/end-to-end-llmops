@@ -21,6 +21,9 @@ myvenv/
 .ruff_cache/
 .ipynb_checkpoints/
 
+# dvc
+/tmp/dvcstore
+
 # os / editor
 .DS_Store
 .idea/
@@ -29,3 +32,9 @@ myvenv/
 *.egg-info/
 eval_report.json
 outputs/
+
+# terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/terraform.tfvars

@@ -27,7 +27,6 @@ from contextlib import asynccontextmanager
 
 import httpx
 import yaml
-from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -37,8 +36,6 @@ from src.serving.schemas import (
     HealthResponse,
     ModelInfo,
 )
-
-load_dotenv()
 
 # --------------------------------------------------------------------------- config
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -205,7 +202,6 @@ async def chat(req: ChatRequest, request: Request):
         )
 
     payload = engine_payload(req, messages, stream=False)
-
     try:
         r = await app.state.client.post(url, json=payload, headers=engine_headers())
     except httpx.TimeoutException:

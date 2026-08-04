@@ -71,11 +71,7 @@ def evaluate(answers: list[str], golden: list[dict]) -> dict:
         "passed": passed,
         "pass_rate": round(passed / n, 4) if n else 0.0,
         "per_category": {
-            c: {
-                "passed": cat_pass[c],
-                "total": cat_total[c],
-                "pass_rate": round(cat_pass[c] / cat_total[c], 4),
-            }
+            c: {"passed": cat_pass[c], "total": cat_total[c], "pass_rate": round(cat_pass[c] / cat_total[c], 4)}
             for c in sorted(cat_total)
         },
         "cases": per_case,

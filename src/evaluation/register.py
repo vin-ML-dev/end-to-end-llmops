@@ -30,11 +30,7 @@ def main() -> None:
     ap.add_argument("--config", default="configs/eval.yaml")
     ap.add_argument("--model", default=None)
     ap.add_argument("--version", required=True, help="semantic version tag, e.g. v1.0.0")
-    ap.add_argument(
-        "--skip-gate",
-        action="store_true",
-        help="skip re-running the gate (only if you JUST ran it)",
-    )
+    ap.add_argument("--skip-gate", action="store_true", help="skip re-running the gate (only if you JUST ran it)")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(ROOT / args.config))
@@ -44,15 +40,7 @@ def main() -> None:
     if not args.skip_gate:
         print(">> re-running gate before registering...")
         rc = subprocess.call(
-            [
-                sys.executable,
-                "-m",
-                "src.evaluation.gate",
-                "--config",
-                args.config,
-                "--model",
-                model_id,
-            ],
+            [sys.executable, "-m", "src.evaluation.gate", "--config", args.config, "--model", model_id],
             cwd=ROOT,
         )
         if rc != 0:

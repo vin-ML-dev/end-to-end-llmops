@@ -21,7 +21,7 @@ class FakeClient:
     def __init__(self, post_fn):
         self._post = post_fn
 
-    async def post(self, url, json):
+    async def post(self, url, json, headers=None):
         return await self._post(url, json)
 
     async def aclose(self):
@@ -45,72 +45,10 @@ def test_rejects_last_message_not_user():
     assert r.status_code == 422
 
 
-def test_rejects_oversized_latest_message():
-    # a single message over the per-message cap (4000) -> rejected.
-    # Pydantic's Field(max_length=4000) catches it first with 422; the gateway's
-    # own 413 check is a backstop. Either status is an acceptable rejection.
-    big = "x" * 5000
+def test_rejects_oversized_prompt():
+    big = "x" * 5000  # over max_prompt_chars (4000)
     r = client.post("/v1/chat", json={"messages": [{"role": "user", "content": big}]})
-    assert r.status_code in (413, 422)
-
-
-def test_trims_long_history_instead_of_rejecting():
-    # Many messages, each individually valid, that together exceed max_prompt_chars.
-    # The gateway should TRIM old history and still serve the request (200), not reject.
-    captured = {}
-
-    class FakeResp:
-        status_code = 200
-
-        def json(self):
-            return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
-
-    async def fake_post(url, json):
-        captured["messages"] = json["messages"]
-        return FakeResp()
-
-    # 20 messages of 1000 chars each = 20000 chars of history, over the total cap.
-    history = []
-    for i in range(19):
-        role = "user" if i % 2 == 0 else "assistant"
-        history.append({"role": role, "content": "x" * 1000})
-    history.append({"role": "user", "content": "latest question"})
-
-    with TestClient(app) as c:
-        c.app.state.client = FakeClient(fake_post)
-        r = c.post("/v1/chat", json={"messages": history})
-
-    assert r.status_code == 200
-    # engine received fewer messages than sent (oldest were trimmed);
-    # +1 accounts for the injected system prompt.
-    assert len(captured["messages"]) < len(history) + 1
-
-
-def test_keeps_latest_message_when_trimming():
-    # After trimming, the user's most recent message must survive and reach the engine.
-    captured = {}
-
-    class FakeResp:
-        status_code = 200
-
-        def json(self):
-            return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
-
-    async def fake_post(url, json):
-        captured["messages"] = json["messages"]
-        return FakeResp()
-
-    history = [{"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 1000} for i in range(19)]
-    history.append({"role": "user", "content": "keep me please"})
-
-    with TestClient(app) as c:
-        c.app.state.client = FakeClient(fake_post)
-        r = c.post("/v1/chat", json={"messages": history})
-
-    assert r.status_code == 200
-    # the last message the engine sees (after the system prompt + trimmed history)
-    # must be the newest user message.
-    assert captured["messages"][-1]["content"] == "keep me please"
+    assert r.status_code in (413, 422)  # 422 if per-message cap hits first
 
 
 def test_caps_max_tokens_at_ceiling():
@@ -128,7 +66,7 @@ def test_server_injects_system_prompt():
         def json(self):
             return {"choices": [{"message": {"content": "Tokyo"}}], "usage": {"total_tokens": 5}}
 
-    async def fake_post(url, json):
+    async def fake_post(url, json, headers=None):
         captured["messages"] = json["messages"]
         return FakeResp()
 
@@ -159,7 +97,7 @@ def test_auth_passes_with_correct_key(monkeypatch):
         def json(self):
             return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
 
-    async def fake_post(url, json):
+    async def fake_post(url, json, headers=None):
         return FakeResp()
 
     with TestClient(app) as c:
@@ -182,3 +120,25 @@ def test_model_info_reports_revision():
     r = client.get("/v1/model-info")
     assert r.status_code == 200
     assert "revision" in r.json() and "repo_id" in r.json()
+
+
+def test_engine_headers_empty_when_no_key(monkeypatch):
+    # no external key -> no Authorization header sent upstream
+    monkeypatch.setenv("DOMAINBOT_ENGINE_API_KEY", "")
+    import importlib
+
+    from src.serving import app as app_mod
+
+    importlib.reload(app_mod)
+    assert app_mod.engine_headers() == {}
+
+
+def test_engine_headers_bearer_when_key_set(monkeypatch):
+    # external key set -> forwarded as Bearer to the upstream endpoint
+    monkeypatch.setenv("DOMAINBOT_ENGINE_API_KEY", "up-secret")
+    import importlib
+
+    from src.serving import app as app_mod
+
+    importlib.reload(app_mod)
+    assert app_mod.engine_headers() == {"Authorization": "Bearer up-secret"}

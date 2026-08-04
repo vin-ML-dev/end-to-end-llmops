@@ -81,3 +81,17 @@ k8s-rollback:  ## undo last gateway rollout
 
 k8s-logs:  ## tail gateway logs
 	kubectl -n domainbot logs -l component=gateway -f
+
+# --- Day 6: CI/CD ---
+cicd-test:  ## validate CI/CD + GitOps config (no pipeline run)
+	pytest tests/test_cicd.py -v
+
+helm-lint:  ## lint + render the Helm chart
+	helm lint helm/domainbot
+	helm template domainbot helm/domainbot
+
+argocd-apply:  ## register the Argo CD application (Argo must be installed)
+	kubectl apply -f argocd/application.yaml
+
+tf-plan:  ## preview Terraform infra changes
+	cd terraform && terraform init && terraform plan

@@ -36,9 +36,7 @@ def load_config(path: str) -> dict:
 
 def git_sha() -> str:
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, text=True
-        ).strip()
+        return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, text=True).strip()
     except Exception:
         return "nogit"
 
@@ -135,9 +133,7 @@ def main() -> None:
     )
     model.config.use_cache = False
     if torch.cuda.is_available():
-        model = prepare_model_for_kbit_training(
-            model, use_gradient_checkpointing=t["gradient_checkpointing"]
-        )
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=t["gradient_checkpointing"])
 
     # ---------------- LoRA ----------------
     lora = cfg["lora"]
