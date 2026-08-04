@@ -49,6 +49,10 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}    # auto-provided, no manual secret
+
+      - name: set up buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: build + push (sha + latest-main tags)
         uses: docker/build-push-action@v6
         with:
