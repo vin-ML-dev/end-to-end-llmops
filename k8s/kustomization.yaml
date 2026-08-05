@@ -9,23 +9,24 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: domainbot
 resources:
-  - 00-namespace.yaml
-  - 10-configmap.yaml
-  - 20-gateway-deployment.yaml
-  - 25-gateway-service.yaml
-  - 40-hpa.yaml
-  - 45-pdb.yaml
+- 00-namespace.yaml
+- 10-configmap.yaml
+- 20-gateway-deployment.yaml
+- 25-gateway-service.yaml
+- 40-hpa.yaml
+- 45-pdb.yaml
 
 secretGenerator:
-  - name: domainbot-secrets
-    namespace: domainbot
-    envs:
-      - .env
+- envs:
+  - .env
+  name: domainbot-secrets
+  namespace: domainbot
 
 generatorOptions:
-  disableNameSuffixHash: true   # keep stable name "domainbot-secrets" so the
+  disableNameSuffixHash: true
                                 # Deployment's envFrom/secretKeyRef keeps working
 
 images:
-  - name: ghcr.io/vin-ml-dev/domainbot-gateway
-    newTag: "git-95e4b6f4c545cecc768b1cd255097031bf9ed7df"
+- name: ghcr.io/vin-ml-dev/domainbot-gateway
+  newName: ghcr.io/vin-ml-dev/domainbot-gateway
+  newTag: git-0aa8069da894787fd9f30b4a5db6aeafc8b7ccb1
