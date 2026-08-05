@@ -73,15 +73,24 @@ jobs:
       contents: write        # to commit the manifest bump
     steps:
       - uses: actions/checkout@v4
-      - name: set image tag in kustomization
+        with:
+          fetch-depth: 0                       # full history so the push isn't rejected
+      - name: set lowercase image name
+        id: image
+        run: echo "name=$(echo 'ghcr.io/${{ github.repository_owner }}/domainbot-gateway' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - name: install kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+      - name: set image tag (replaces cleanly — never appends a duplicate)
         run: |
           cd k8s
-          # pin the deployed image to this exact commit
-          sed -i "s|newTag:.*|newTag: \"git-${{ github.sha }}\"|" kustomization.yaml
+          kustomize edit set image ${{ steps.image.outputs.name }}=${{ steps.image.outputs.name }}:git-${{ github.sha }}
       - name: commit the bump
         run: |
           git config user.name "ci-bot"
           git config user.email "ci-bot@users.noreply.github.com"
+          git pull --rebase origin main         # avoid rejection if main moved
           git add k8s/kustomization.yaml
           git commit -m "ci: deploy git-${{ github.sha }} [skip ci]" || echo "no change"
           git push
