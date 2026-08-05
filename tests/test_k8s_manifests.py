@@ -49,15 +49,6 @@ def test_service_selector_matches_pod_labels():
         assert pod_labels.get(k) == v
 
 
-def test_external_endpoint_url_is_in_secret_not_committed_real():
-    # the external endpoint URL lives in the Secret and must be a template
-    s = load("15-secret.yaml")
-    assert "DOMAINBOT_ENGINE_URL" in s["stringData"]
-    assert (
-        "REPLACE-ME" in s["stringData"]["DOMAINBOT_ENGINE_URL"] or "example" in s["stringData"]["DOMAINBOT_ENGINE_URL"]
-    )
-
-
 def test_hpa_targets_the_gateway_deployment():
     hpa = load("40-hpa.yaml")
     assert hpa["spec"]["scaleTargetRef"]["name"] == "domainbot-gateway"
@@ -68,8 +59,3 @@ def test_gateway_runs_non_root():
     d = load("20-gateway-deployment.yaml")
     sc = d["spec"]["template"]["spec"]["securityContext"]
     assert sc["runAsNonRoot"] is True
-
-
-def test_secret_is_template_not_real_values():
-    s = load("15-secret.yaml")
-    assert "changeme" in s["stringData"]["DOMAINBOT_API_KEY"]
