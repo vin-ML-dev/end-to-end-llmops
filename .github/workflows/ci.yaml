@@ -82,15 +82,24 @@ jobs:
         run: |
           curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
           sudo mv kustomize /usr/local/bin/
-      - name: set image tag (replaces cleanly — never appends a duplicate)
+      - name: bump image tag and push
         run: |
-          cd k8s
-          kustomize edit set image ${{ steps.image.outputs.name }}=${{ steps.image.outputs.name }}:git-${{ github.sha }}
-      - name: commit the bump
-        run: |
+          # identity FIRST (rebase may need to create commits)
           git config user.name "ci-bot"
           git config user.email "ci-bot@users.noreply.github.com"
-          git add k8s/kustomization.yaml
-          git commit -m "ci: deploy git-${{ github.sha }} [skip ci]" || echo "no change"
+          # pull BEFORE editing so we bump on top of latest main (clean tree, no conflict)
           git pull --rebase origin main
-          git push
+          # idempotent tag replace — never appends a duplicate newTag
+          cd k8s
+          kustomize edit set image ${{ steps.image.outputs.name }}=${{ steps.image.outputs.name }}:git-${{ github.sha }}
+          cd ..
+          git add k8s/kustomization.yaml
+          # precise no-op check (won't mask real commit errors)
+          if git diff --cached --quiet; then echo "no change"; exit 0; fi
+          git commit -m "ci: deploy git-${{ github.sha }} [skip ci]"
+          # retry-safe push in case main moved during the run
+          for i in 1 2 3; do
+            git push && exit 0
+            git pull --rebase origin main
+          done
+          echo "push failed after retries" && exit 1
