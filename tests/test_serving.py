@@ -83,13 +83,13 @@ def test_server_injects_system_prompt():
 
 # ---------------------------------------------------------------- auth
 def test_auth_required_when_key_set(monkeypatch):
-    monkeypatch.setenv("DOMAINBOT_API_KEY", "secret123")
+    monkeypatch.setenv("DOMAINBOT_ENGINE_API_KEY", "secret123")
     r = client.post("/v1/chat", json={"messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 401  # missing key
 
 
 def test_auth_passes_with_correct_key(monkeypatch):
-    monkeypatch.setenv("DOMAINBOT_API_KEY", "secret123")
+    monkeypatch.setenv("DOMAINBOT_ENGINE_API_KEY", "secret123")
 
     class FakeResp:
         status_code = 200
