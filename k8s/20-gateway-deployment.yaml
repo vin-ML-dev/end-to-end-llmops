@@ -35,9 +35,10 @@ spec:
 
       containers:
         - name: gateway
-          image: domainbot-gateway:1.1.0
+          image: ghcr.io/vin-ml-dev/domainbot-gateway
           imagePullPolicy: IfNotPresent
           # image: ghcr.io/vin-ML-dev/domainbot-gateway:1.1.0
+          #ghcr.io/vin-ML-dev/domainbot-gateway
 
           ports:
             - containerPort: 8000

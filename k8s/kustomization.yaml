@@ -15,5 +15,5 @@ resources:
   - 45-pdb.yaml
 
 images:
-  - name: ghcr.io/vin-ML-dev/domainbot-gateway
+  - name: ghcr.io/vin-ml-dev/domainbot-gateway
     newTag: "git-f2b00e5f9407b79754be6e738e030060f38db3fc"
