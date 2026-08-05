@@ -28,4 +28,4 @@ generatorOptions:
 
 images:
   - name: ghcr.io/vin-ml-dev/domainbot-gateway
-    newTag: "git-0f01c37c3811a708e243a6b81f1da8c3f9a5ceb9"
+    newTag: "git-95e4b6f4c545cecc768b1cd255097031bf9ed7df"
