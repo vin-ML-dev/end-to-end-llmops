@@ -2,17 +2,29 @@
 #
 # ARCHITECTURE: gateway-only. The model is an EXTERNAL managed endpoint; there is
 # no engine Deployment here. The gateway reaches the model via DOMAINBOT_ENGINE_URL.
+#
+# SECRETS: generated from k8s/.env (NOT committed to git — see .gitignore).
+# Copy k8s/.env.example to k8s/.env and fill in real values before applying.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: domainbot
 resources:
   - 00-namespace.yaml
   - 10-configmap.yaml
-  - 15-secret.yaml
   - 20-gateway-deployment.yaml
   - 25-gateway-service.yaml
   - 40-hpa.yaml
   - 45-pdb.yaml
+
+secretGenerator:
+  - name: domainbot-secrets
+    namespace: domainbot
+    envs:
+      - .env
+
+generatorOptions:
+  disableNameSuffixHash: true   # keep stable name "domainbot-secrets" so the
+                                # Deployment's envFrom/secretKeyRef keeps working
 
 images:
   - name: ghcr.io/vin-ml-dev/domainbot-gateway

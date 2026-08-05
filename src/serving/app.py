@@ -82,6 +82,7 @@ app = FastAPI(title="DomainBot Gateway", version="1.0.0", lifespan=lifespan)
 # --------------------------------------------------------------------------- auth
 def require_api_key(authorization: str | None = Header(default=None)) -> None:
     expected = os.getenv(CFG["server"]["api_key_env"])
+    # print("expected",expected)
     if not expected:
         return  # no key configured -> auth disabled (dev). Set the env var in prod.
     if authorization != f"Bearer {expected}":
@@ -148,6 +149,8 @@ def engine_headers() -> dict:
     """Headers for the upstream (external) model endpoint. If the managed endpoint
     requires a token, forward it as a Bearer header. Empty key -> no auth header."""
     key = CFG["model"].get("engine_api_key", "")
+
+    # print("key:",key)
     return {"Authorization": f"Bearer {key}"} if key else {}
 
 

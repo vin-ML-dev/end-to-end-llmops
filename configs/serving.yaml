@@ -17,7 +17,7 @@ server:
   system_prompt: >
     You are DomainBot, a helpful and precise assistant. Answer accurately and
     concisely, and say when you don't know.
-  api_key_env: DOMAINBOT_API_KEY   # required in the Authorization header
+  api_key_env: DOMAINBOT_ENGINE_API_KEY   # required in the Authorization header
   engine_timeout_s: 30             # upstream timeout -> 504 on exceed
 
 limits:

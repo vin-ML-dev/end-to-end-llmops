@@ -4,9 +4,8 @@
 > A complete LLM lifecycle on Kubernetes with CI/CD, caching, A/B rollout,
 > observability, and automated retraining.
 
-**Status:** ✅ Day 5/10 — gateway live on Kubernetes, calling an external model endpoint (RunPod)
+**Status:** ✅ Day 6/10 — automated CI/CD (GitHub Actions → GHCR → Argo CD GitOps); gateway live on Kubernetes
 **Dataset:** [`Open-Orca/OpenOrca`](https://huggingface.co/datasets/Open-Orca/OpenOrca) — ~4.2M GPT-3.5/GPT-4 instruction pairs over FLAN prompts (MIT)
-**Base model:** `Qwen/Qwen2.5-1.5B-Instruct` (Apache-2.0) · **Deployed:** `v1.1.0`
 
 ---
 
@@ -19,8 +18,9 @@ OpenOrca → curate (quality · PII · dedup) → chat format → train/val/test
                                                               ↓
                               merge → push to HF Hub → GATE → register v1.1.0
                                                               ↓
-        [user] → [K8s: FastAPI gateway] ──HTTP──▶ [external model endpoint (RunPod, OpenAI API)]
-                     probes · auth · limits
+        push to main → CI (test·build·push git-sha) → Argo CD (GitOps) → K8s
+                                                              ↓
+        [user] → [K8s: FastAPI gateway] ──HTTP──▶ [external model endpoint (RunPod)]
 ```
 
 ## Quickstart
@@ -68,7 +68,16 @@ use as **stratification categories** so every split contains every task family.
 - **Golden set is frozen** — never trained on, never edited to make a model pass,
   only ever grows as production bugs are found.
 - **PII scrubbing is narrow (INC-013):** only email/phone/card/SSN — never locations, dates, or
-  names, which are legitimate answer content. Over-scrubbing once leaked `<LOCATION>` into answers.
+  names (legitimate content). Over-scrubbing once leaked `<LOCATION>` into training answers.
+
+## Docs
+
+- [Decisions (ADRs)](DECISIONS.md) — why each tool was chosen, and the tradeoffs
+- [Incidents](INCIDENTS.md) — failures, root causes, preventions
+- [Runbook](RUNBOOK.md) · [Costs](COSTS.md) · [Day 1 notes](docs/theory-day1.md)
+- [COMMANDS.txt](COMMANDS.txt) · day2 · day3 · day4 · day5 · [day6](COMMANDS-day6.txt) — every command, in order
+
+
 
 ---
 
@@ -94,12 +103,12 @@ lower LR · higher LoRA rank. Winner chosen by eval_loss **and** a read of
 
 | Run | lora_r | epochs | eval_loss | notes |
 |---|---|---|---|---|
-| baseline | 16 | 3 | 1.3181 | tied on loss; emitted a placeholder on a fact |
+| baseline | 16 | 3 | 1.3181 | tied; emitted a placeholder on a fact |
 | more_epochs | 16 | 5 | 1.3174 | overfit after epoch 2 (early-stopped) |
 | **rank32** ✅ | 32 | 3 | **1.3156** | winner: lowest loss + cleanest generations |
 
-All three within **0.003 eval_loss** — a tie broken by reading generations. Later retrained on
-PII-corrected data → deployed as **v1.1.0**.
+All within **0.003 eval_loss** — a tie broken by reading generations. Later retrained on
+PII-corrected data → deployed **v1.1.0**.
 
 > Compute dtype is auto-detected: **bf16** on Ampere+ (RTX 30xx/A100), **fp16** on T4.
 > Hardcoding it is the #1 QLoRA portability crash (INC-008).
@@ -127,11 +136,11 @@ make register VERSION=v1.0.0           # register only if it passed
 ```
 
 > **The gate worked in both directions.** Run 1 blocked at 82% — the per-category condition caught
-> `honesty` at 33% (a floor-only gate would miss it). Investigation showed the model was *right* but
-> the golden patterns too narrow (false-positive block); broadening them → 100%, approved. Separately,
-> INC-013 (PII `<LOCATION>` leak) was traced data→weights→gate→production and fixed at the source; the
-> golden set now bans placeholder tags. Clean retrain registered as **v1.1.0**. The golden set is never
-> loosened to pass a *bad* model — only fixed when it wrongly rejects a *good* one.
+> `honesty` at 33% (a floor-only gate would miss it). The model was actually *right*; the golden
+> patterns were too narrow (false-positive block) → broadened → 100%, approved. Separately, INC-013
+> (PII `<LOCATION>` leak) was traced data→weights→gate→production and fixed at the source; the golden
+> set now bans placeholder tags. Clean retrain → **v1.1.0**. The set is never loosened to pass a
+> *bad* model — only fixed when it wrongly rejects a *good* one.
 
 
 ## Day 4 — Serving: vLLM + FastAPI gateway + Docker
@@ -201,18 +210,52 @@ kubectl -n domainbot port-forward svc/domainbot-gateway 8000:8000
 
 **Two keys, two doors:** `DOMAINBOT_API_KEY` guards the gateway (client → gateway);
 `DOMAINBOT_ENGINE_API_KEY` authenticates the gateway to the external endpoint (gateway → RunPod).
-`api_key_env` in `serving.yaml` must point at the *gateway's* key, not the engine's — crossing them
-makes the gateway demand the upstream key from clients (a real bug we hit and fixed).
+`api_key_env` in `serving.yaml` must point at the *gateway's* key — crossing them makes the gateway
+demand the upstream key from clients (a real bug hit and fixed). In K8s, both keys come from the
+Secret, not `.env`.
 
-> **The endpoint URL + keys live in a Secret, never in Git.** Swap `DOMAINBOT_ENGINE_URL` to move
-> between providers (or later to an in-cluster engine) with zero code change — the same
-> engine-swappable design from Day 4.
+> **Verified end-to-end:** gateway on a kind cluster → RunPod Serverless vLLM (OpenAI `/openai/v1`)
+> → clean *"The capital of Japan is Tokyo."* Readiness correctly held traffic (0/1, no restart) when
+> the endpoint was unreachable. Swap `DOMAINBOT_ENGINE_URL` to move providers with zero code change.
+> This gateway-to-external-endpoint architecture is the standing setup for Days 6–10.
 
-**Verified end-to-end:** gateway deployed on a local kind cluster, pointed at a RunPod Serverless
-vLLM endpoint (OpenAI-compatible `/openai/v1`). `POST /v1/chat` returned the clean
-*"The capital of Japan is Tokyo."* — laptop → gateway pod → RunPod → back. Readiness correctly held
-traffic (0/1, no restart) when the upstream endpoint was unreachable. This gateway-to-external-endpoint
-architecture is the standing setup for Days 6–10.
+## Day 6 — CI/CD: GitHub Actions + Argo CD (GitOps) + Terraform + Helm
+
+Every push to main is tested, built, and rolled out automatically. Deploy = merge;
+rollback = `git revert`. The gateway ships through the pipeline; the model stays external.
+
+```
+push to main → CI: lint → test → build+push image(git-<sha>) → bump kustomization.yaml
+                                                                       ↓ (git commit)
+                                              Argo CD (in-cluster) detects → syncs cluster
+```
+
+- **CI (`.github/workflows/ci.yaml`)** — lint (ruff) + pytest + validate k8s manifests, then
+  build and push `ghcr.io/.../domainbot-gateway:git-<sha>`. **Tests gate the build**
+  (`build-push needs: test`) — untested code can never ship (ADR-017).
+- **GitOps (Argo CD, `argocd/application.yaml`)** — the cluster *pulls* desired state from Git.
+  CI writes the new image tag into `k8s/kustomization.yaml`; Argo detects the commit and syncs.
+  `selfHeal` reverts manual drift; `prune` removes deleted resources. Rollback = `git revert`
+  (ADR-018). No CI system holds cluster credentials.
+- **Terraform (`terraform/`)** — declaratively provisions the namespace + secrets (and, in a cloud
+  setup, the cluster itself). Infra layer, separate from app deploy (ADR-019).
+- **Helm (`helm/domainbot/`)** — values-based packaging as an alternative to Kustomize.
+
+```bash
+make cicd-test                         # 8 config tests, no pipeline run
+kubectl apply -f argocd/application.yaml    # register the Argo app
+git push                               # → CI builds → Argo deploys
+```
+
+> **Deploy and rollback are ordinary Git operations** — auditable, reviewable, revertible. The
+> cluster state always equals what's in Git. This pipeline carries only the gateway; the model
+> endpoint is managed externally (Day 5), so retrains publish to the Hub and the gateway just
+> points at the new revision.
+
+**GHCR gotcha (learned the hard way):** image references must be **lowercase** — a `vin-ML-dev`
+namespace fails to parse (`repository name must be lowercase`); GHCR stores it as `vin-ml-dev`. And
+the kustomization `images.name` must match the deployment image *exactly* (a one-character typo
+silently drops the tag → `InvalidImageName`). CI now lowercases the owner before tagging.
 
 ## What I'd do differently at 100× scale
 
@@ -222,5 +265,6 @@ _(written Day 10)_
 
 `Python` `HF datasets (streaming)` `DVC` `Presidio` `pydantic` `pytest` `ruff` `pre-commit`
 `PEFT/QLoRA` `TRL` `bitsandbytes` `MLflow` `Hugging Face Hub`
-`vLLM` `FastAPI` `Docker` `Kubernetes` `Kustomize` `HPA`
-_(growing daily: CI/CD, Argo CD, Terraform, Helm, Redis, Prometheus, Grafana)_
+`vLLM` `FastAPI` `Docker` `Kubernetes` `Kustomize` `Helm`
+`GitHub Actions` `GHCR` `Argo CD` `Terraform`
+_(growing daily: Redis, Prometheus, Grafana)_
