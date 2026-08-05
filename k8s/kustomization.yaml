@@ -19,4 +19,4 @@ resources:
 images:
 - name: ghcr.io/vin-ml-dev/domainbot-gateway
   newName: ghcr.io/vin-ml-dev/domainbot-gateway
-  newTag: git-0aa8069da894787fd9f30b4a5db6aeafc8b7ccb1
+  newTag: git-23a82edfa673ee3c6cad613440d544d320149838
