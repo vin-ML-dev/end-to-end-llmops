@@ -16,16 +16,6 @@ resources:
 - 40-hpa.yaml
 - 45-pdb.yaml
 
-secretGenerator:
-- envs:
-  - .env
-  name: domainbot-secrets
-  namespace: domainbot
-
-generatorOptions:
-  disableNameSuffixHash: true
-                                # Deployment's envFrom/secretKeyRef keeps working
-
 images:
 - name: ghcr.io/vin-ml-dev/domainbot-gateway
   newName: ghcr.io/vin-ml-dev/domainbot-gateway

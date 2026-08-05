@@ -1,5 +1,4 @@
 # secrets — never commit
-k8s/.env
 .env
 *.pem
 *.key
