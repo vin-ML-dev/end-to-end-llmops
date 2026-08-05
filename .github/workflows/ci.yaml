@@ -90,7 +90,7 @@ jobs:
         run: |
           git config user.name "ci-bot"
           git config user.email "ci-bot@users.noreply.github.com"
-          git pull --rebase origin main         # avoid rejection if main moved
           git add k8s/kustomization.yaml
           git commit -m "ci: deploy git-${{ github.sha }} [skip ci]" || echo "no change"
+          git pull --rebase origin main
           git push
