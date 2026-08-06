@@ -95,3 +95,10 @@ argocd-apply:  ## register the Argo CD application (Argo must be installed)
 
 tf-plan:  ## preview Terraform infra changes
 	cd terraform && terraform init && terraform plan
+
+# --- Day 7: caching + rate limiting + A/B ---
+cache-test:  ## test cache/ratelimit/routing logic (no Redis)
+	pytest tests/test_caching_routing.py -v
+
+redis-local:  ## run a local Redis for dev
+	docker run --rm -p 6379:6379 redis:7-alpine

@@ -1,0 +1,30 @@
+# Redis for the gateway's cache + rate limiter (Day 7). Single replica is fine —
+# it's a cache (data is disposable; if Redis restarts, the gateway just repopulates).
+# For HA you'd use Redis Sentinel/Cluster, but that's overkill for a cache here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: domainbot-redis
+  namespace: domainbot
+  labels: { app: domainbot, component: redis }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: domainbot, component: redis }
+  template:
+    metadata:
+      labels: { app: domainbot, component: redis }
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+          # allkeys-lru: when full, evict least-recently-used keys — correct for a cache
+          ports: [{ containerPort: 6379 }]
+          resources:
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits:   { cpu: "250m", memory: "320Mi" }
+          livenessProbe:
+            tcpSocket: { port: 6379 }
+            initialDelaySeconds: 5
+            periodSeconds: 10

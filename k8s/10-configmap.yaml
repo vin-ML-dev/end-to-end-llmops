@@ -11,3 +11,9 @@ data:
   DOMAINBOT_REVISION: "v1.1.0"                       # for /v1/model-info reporting
   DOMAINBOT_REPO_ID: "vinmlops/domainbot-1.5b-rank32"
   DOMAINBOT_ENGINE_TIMEOUT_S: "30"                   # upstream call timeout
+  DOMAINBOT_REDIS_URL: "redis://domainbot-redis:6379/0"
+  DOMAINBOT_CACHE_ENABLED: "true"
+  DOMAINBOT_CACHE_TTL_S: "3600"
+  DOMAINBOT_RATELIMIT_ENABLED: "true"
+  DOMAINBOT_RATELIMIT_PER_MIN: "60"
+  DOMAINBOT_CANARY_PERCENT: "0"

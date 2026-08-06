@@ -27,9 +27,13 @@ from contextlib import asynccontextmanager
 
 import httpx
 import yaml
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from src.serving.cache import ResponseCache, cache_key, is_cacheable
+from src.serving.ratelimit import RateLimiter
+from src.serving.routing import pick_variant
 from src.serving.schemas import (
     ChatRequest,
     ChatResponse,
@@ -37,6 +41,7 @@ from src.serving.schemas import (
     ModelInfo,
 )
 
+load_dotenv()
 # --------------------------------------------------------------------------- config
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -71,9 +76,31 @@ async def lifespan(app: FastAPI):
     # one shared async client for the whole process (connection pooling)
     app.state.client = httpx.AsyncClient(timeout=CFG["server"]["engine_timeout_s"])
     app.state.ready = False
+
+    # Redis for cache + rate limiting (Day 7). Optional — if it can't connect,
+    # we run WITHOUT cache/limits rather than failing. A cache is an optimization,
+    # never a hard dependency.
+    app.state.redis = None
+    redis_url = os.getenv("DOMAINBOT_REDIS_URL", "")
+    if redis_url:
+        try:
+            import redis.asyncio as aioredis
+
+            r = aioredis.from_url(redis_url, decode_responses=True)
+            await r.ping()
+            app.state.redis = r
+            log_json(event="redis_connected", url=redis_url)
+        except Exception as e:  # noqa: BLE001
+            log_json(event="redis_unavailable", error=str(e))
+
+    app.state.cache = ResponseCache(app.state.redis)
+    app.state.limiter = RateLimiter(app.state.redis)
+
     log_json(event="startup", model=CFG["model"]["repo_id"], revision=CFG["model"]["revision"])
     yield
     await app.state.client.aclose()
+    if app.state.redis is not None:
+        await app.state.redis.aclose()
 
 
 app = FastAPI(title="DomainBot Gateway", version="1.0.0", lifespan=lifespan)
@@ -81,8 +108,9 @@ app = FastAPI(title="DomainBot Gateway", version="1.0.0", lifespan=lifespan)
 
 # --------------------------------------------------------------------------- auth
 def require_api_key(authorization: str | None = Header(default=None)) -> None:
-    expected = os.getenv(CFG["server"]["api_key_env"])
-    # print("expected",expected)
+    # expected = os.getenv(CFG["server"]["api_key_env"])
+    expected = os.getenv(CFG["server"]["api_key_env"]) or os.getenv("DOMAINBOT_ENGINE_API_KEY")
+    print(expected)
     if not expected:
         return  # no key configured -> auth disabled (dev). Set the env var in prod.
     if authorization != f"Bearer {expected}":
@@ -149,8 +177,6 @@ def engine_headers() -> dict:
     """Headers for the upstream (external) model endpoint. If the managed endpoint
     requires a token, forward it as a Bearer header. Empty key -> no auth header."""
     key = CFG["model"].get("engine_api_key", "")
-
-    # print("key:",key)
     return {"Authorization": f"Bearer {key}"} if key else {}
 
 
@@ -195,16 +221,40 @@ async def model_info():
 @app.post("/v1/chat", response_model=ChatResponse, dependencies=[Depends(require_api_key)])
 async def chat(req: ChatRequest, request: Request):
     validate_limits(req)
-    messages = build_messages(req.messages)
-    url = CFG["model"]["engine_url"].rstrip("/") + "/chat/completions"
 
+    # --- rate limit (Day 7): per-client quota, 429 when exceeded ---
+    client_id = _client_id(request)
+    allowed, remaining = await app.state.limiter.check(client_id)
+    if not allowed:
+        raise HTTPException(status_code=429, detail="rate limit exceeded") from None
+
+    messages = build_messages(req.messages)
+
+    # streaming responses bypass the cache (they're consumed incrementally)
     if req.stream:
+        url = CFG["model"]["engine_url"].rstrip("/") + "/chat/completions"
         return StreamingResponse(
             stream_chat(request, url, engine_payload(req, messages, stream=True)),
             media_type="text/event-stream",
         )
 
     payload = engine_payload(req, messages, stream=False)
+    temperature = payload["temperature"]
+
+    # --- A/B routing (Day 7): sticky-per-client canary split ---
+    variant = pick_variant(client_id)
+    engine_url, revision = _variant_upstream(variant)
+    url = engine_url.rstrip("/") + "/chat/completions"
+
+    # --- cache lookup (Day 7): only for deterministic (temp==0) requests ---
+    ck = None
+    if is_cacheable(temperature):
+        ck = cache_key(messages, {k: payload[k] for k in ("max_tokens", "temperature", "top_p")}, revision)
+        cached = await app.state.cache.get(ck)
+        if cached is not None:
+            log_json(event="cache_hit", rid=request.state.rid, variant=variant)
+            return ChatResponse(**cached)
+
     try:
         r = await app.state.client.post(url, json=payload, headers=engine_headers())
     except httpx.TimeoutException:
@@ -212,16 +262,42 @@ async def chat(req: ChatRequest, request: Request):
     except httpx.ConnectError:
         raise HTTPException(status_code=503, detail="engine unavailable") from None
     if r.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"engine error {r.status_code}")
+        raise HTTPException(status_code=502, detail=f"engine error {r.status_code}") from None
 
     data = r.json()
     choice = data["choices"][0]["message"]["content"]
-    return ChatResponse(
+    result = ChatResponse(
         content=choice,
         model=CFG["model"]["repo_id"],
-        revision=CFG["model"]["revision"],
+        revision=revision,
         usage=data.get("usage", {}),
     )
+
+    # --- cache store (Day 7) ---
+    if ck is not None:
+        await app.state.cache.set(ck, result.model_dump())
+        log_json(event="cache_miss", rid=request.state.rid, variant=variant)
+
+    return result
+
+
+def _client_id(request: Request) -> str:
+    """Identify the client for rate-limiting + sticky routing.
+    Prefer the API key; fall back to source IP."""
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        return "key:" + auth[len("Bearer ") :][:16]
+    return "ip:" + (request.client.host if request.client else "unknown")
+
+
+def _variant_upstream(variant: str) -> tuple[str, str]:
+    """Return (engine_url, revision) for the chosen A/B variant.
+    Canary uses separate env vars; falls back to stable if unset."""
+    if variant == "canary":
+        url = os.getenv("DOMAINBOT_CANARY_ENGINE_URL", CFG["model"]["engine_url"])
+        rev = os.getenv("DOMAINBOT_CANARY_REVISION", CFG["model"]["revision"])
+        return url, rev
+    return CFG["model"]["engine_url"], CFG["model"]["revision"]
 
 
 async def stream_chat(request: Request, url: str, payload: dict):
