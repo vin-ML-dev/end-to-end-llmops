@@ -27,7 +27,6 @@ from contextlib import asynccontextmanager
 
 import httpx
 import yaml
-from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -41,7 +40,6 @@ from src.serving.schemas import (
     ModelInfo,
 )
 
-load_dotenv()
 # --------------------------------------------------------------------------- config
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -108,9 +106,7 @@ app = FastAPI(title="DomainBot Gateway", version="1.0.0", lifespan=lifespan)
 
 # --------------------------------------------------------------------------- auth
 def require_api_key(authorization: str | None = Header(default=None)) -> None:
-    # expected = os.getenv(CFG["server"]["api_key_env"])
-    expected = os.getenv(CFG["server"]["api_key_env"]) or os.getenv("DOMAINBOT_ENGINE_API_KEY")
-    print(expected)
+    expected = os.getenv(CFG["server"]["api_key_env"])
     if not expected:
         return  # no key configured -> auth disabled (dev). Set the env var in prod.
     if authorization != f"Bearer {expected}":
@@ -161,10 +157,10 @@ def validate_limits(req: ChatRequest) -> None:
         raise HTTPException(status_code=413, detail="prompt too large")
 
 
-def engine_payload(req: ChatRequest, messages: list[dict], stream: bool) -> dict:
+def engine_payload(req: ChatRequest, messages: list[dict], stream: bool, model_name: str | None = None) -> dict:
     limits, gen = CFG["limits"], CFG["generation"]
     return {
-        "model": CFG["model"]["engine_model_name"],
+        "model": model_name or CFG["model"]["engine_model_name"],
         "messages": messages,
         "max_tokens": min(req.max_tokens or limits["default_new_tokens"], limits["max_new_tokens"]),
         "temperature": req.temperature if req.temperature is not None else gen["temperature"],
@@ -238,13 +234,14 @@ async def chat(req: ChatRequest, request: Request):
             media_type="text/event-stream",
         )
 
-    payload = engine_payload(req, messages, stream=False)
-    temperature = payload["temperature"]
-
     # --- A/B routing (Day 7): sticky-per-client canary split ---
+    # pick the variant FIRST so the payload uses that variant's model name
     variant = pick_variant(client_id)
-    engine_url, revision = _variant_upstream(variant)
+    engine_url, revision, model_name = _variant_upstream(variant)
     url = engine_url.rstrip("/") + "/chat/completions"
+
+    payload = engine_payload(req, messages, stream=False, model_name=model_name)
+    temperature = payload["temperature"]
 
     # --- cache lookup (Day 7): only for deterministic (temp==0) requests ---
     ck = None
@@ -290,14 +287,17 @@ def _client_id(request: Request) -> str:
     return "ip:" + (request.client.host if request.client else "unknown")
 
 
-def _variant_upstream(variant: str) -> tuple[str, str]:
-    """Return (engine_url, revision) for the chosen A/B variant.
-    Canary uses separate env vars; falls back to stable if unset."""
+def _variant_upstream(variant: str) -> tuple[str, str, str]:
+    """Return (engine_url, revision, model_name) for the chosen A/B variant.
+    Each variant can serve under a different model name (the endpoint may be strict
+    about the 'model' field). Canary uses separate env vars; falls back to stable."""
     if variant == "canary":
         url = os.getenv("DOMAINBOT_CANARY_ENGINE_URL", CFG["model"]["engine_url"])
         rev = os.getenv("DOMAINBOT_CANARY_REVISION", CFG["model"]["revision"])
-        return url, rev
-    return CFG["model"]["engine_url"], CFG["model"]["revision"]
+        name = os.getenv("DOMAINBOT_CANARY_MODEL_NAME", CFG["model"]["engine_model_name"])
+        return url, rev, name
+    name = os.getenv("DOMAINBOT_ENGINE_MODEL_NAME", CFG["model"]["engine_model_name"])
+    return CFG["model"]["engine_url"], CFG["model"]["revision"], name
 
 
 async def stream_chat(request: Request, url: str, payload: dict):
