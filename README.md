@@ -4,23 +4,19 @@
 > A complete LLM lifecycle on Kubernetes with CI/CD, caching, A/B rollout,
 > observability, and automated retraining.
 
-**Status:** ✅ Day 6/10 — automated CI/CD (GitHub Actions → GHCR → Argo CD GitOps); gateway live on Kubernetes
+**Status:** 🚧 Day 8/10 — observability (Prometheus metrics + Grafana dashboards + alerts)
 **Dataset:** [`Open-Orca/OpenOrca`](https://huggingface.co/datasets/Open-Orca/OpenOrca) — ~4.2M GPT-3.5/GPT-4 instruction pairs over FLAN prompts (MIT)
 
 ---
 
 ## Architecture
 
+_(diagram lands Day 5)_
+
 ```
-OpenOrca → curate (quality · PII · dedup) → chat format → train/val/test
-                                                              ↓
-                                              QLoRA fine-tune (MLflow)
-                                                              ↓
-                              merge → push to HF Hub → GATE → register v1.1.0
-                                                              ↓
-        push to main → CI (test·build·push git-sha) → Argo CD (GitOps) → K8s
-                                                              ↓
-        [user] → [K8s: FastAPI gateway] ──HTTP──▶ [external model endpoint (RunPod)]
+OpenOrca (stream) → quality filters → PII scrub → dedup → chat format → train/val/test
+                          ↓                                                    ↓
+                  curation_report.json                            (Day 2: QLoRA fine-tune)
 ```
 
 ## Quickstart
@@ -49,7 +45,7 @@ use as **stratification categories** so every split contains every task family.
 | Raw rows ingested | 24 |
 | After curation | 13 (**54% survival**) |
 | Removed | refusal 1 · truncated 1 · question-echo 1 · repetition 2 · all-caps 1 · non-English 1 · length 2 · exact-dup 2 |
-| PII scrubbed | email · phone · card · SSN only (locations/dates preserved — INC-013) |
+| PII scrubbed | 1 record (EMAIL, CARD, IP) |
 | Chat examples built | 17 (13 curated + 4 honesty) |
 | Train / val / test | 7 / 5 / 5 |
 | Golden set (frozen) | 22 cases |
@@ -67,15 +63,13 @@ use as **stratification categories** so every split contains every task family.
   always answer; without a counterweight a fine-tune confidently invents facts.
 - **Golden set is frozen** — never trained on, never edited to make a model pass,
   only ever grows as production bugs are found.
-- **PII scrubbing is narrow (INC-013):** only email/phone/card/SSN — never locations, dates, or
-  names (legitimate content). Over-scrubbing once leaked `<LOCATION>` into training answers.
 
 ## Docs
 
 - [Decisions (ADRs)](DECISIONS.md) — why each tool was chosen, and the tradeoffs
 - [Incidents](INCIDENTS.md) — failures, root causes, preventions
 - [Runbook](RUNBOOK.md) · [Costs](COSTS.md) · [Day 1 notes](docs/theory-day1.md)
-- [COMMANDS.txt](COMMANDS.txt) · day2 · day3 · day4 · day5 · [day6](COMMANDS-day6.txt) — every command, in order
+- [COMMANDS.txt](COMMANDS.txt) — every command for Day 1, in order
 
 
 
@@ -83,7 +77,7 @@ use as **stratification categories** so every split contains every task family.
 
 ## Day 2 — QLoRA fine-tuning + MLflow
 
-Fine-tune `Qwen2.5-1.5B-Instruct` on the Day 1 dataset using **QLoRA** (4-bit NF4
+Fine-tune `Qwen2.5-0.5B-Instruct` on the Day 1 dataset using **QLoRA** (4-bit NF4
 base + LoRA adapters, ~1-3% of params trainable), tracked in **MLflow**.
 
 - `configs/train.yaml` — every hyperparameter; run experiments by editing this, not code
@@ -101,14 +95,11 @@ make mlflow-ui        # http://localhost:5000
 lower LR · higher LoRA rank. Winner chosen by eval_loss **and** a read of
 `sample_generations.json` — eval_loss alone never tells you if answers are actually good.
 
-| Run | lora_r | epochs | eval_loss | notes |
-|---|---|---|---|---|
-| baseline | 16 | 3 | 1.3181 | tied; emitted a placeholder on a fact |
-| more_epochs | 16 | 5 | 1.3174 | overfit after epoch 2 (early-stopped) |
-| **rank32** ✅ | 32 | 3 | **1.3156** | winner: lowest loss + cleanest generations |
-
-All within **0.003 eval_loss** — a tie broken by reading generations. Later retrained on
-PII-corrected data → deployed **v1.1.0**.
+| Run | eval_loss | notes |
+|---|---|---|
+| baseline | _fill in_ | |
+| more_epochs | _fill in_ | |
+| rank32 | _fill in_ | |
 
 > Compute dtype is auto-detected: **bf16** on Ampere+ (RTX 30xx/A100), **fp16** on T4.
 > Hardcoding it is the #1 QLoRA portability crash (INC-008).
@@ -135,17 +126,15 @@ make gate                              # run it against your model (GPU)
 make register VERSION=v1.0.0           # register only if it passed
 ```
 
-> **The gate worked in both directions.** Run 1 blocked at 82% — the per-category condition caught
-> `honesty` at 33% (a floor-only gate would miss it). The model was actually *right*; the golden
-> patterns were too narrow (false-positive block) → broadened → 100%, approved. Separately, INC-013
-> (PII `<LOCATION>` leak) was traced data→weights→gate→production and fixed at the source; the golden
-> set now bans placeholder tags. Clean retrain → **v1.1.0**. The set is never loosened to pass a
-> *bad* model — only fixed when it wrongly rejects a *good* one.
+> **The gate caught a real bug.** The Day 2 PII over-scrubbing (INC-013) means the model emits
+> `<LOCATION>` placeholders on some fact questions — so the gate blocks those cases. That is the
+> gate doing its job: a defect found mechanically, not by luck. Fix = correct the data, retrain,
+> re-gate. The golden set is never edited to force a pass.
 
 
 ## Day 4 — Serving: vLLM + FastAPI gateway + Docker
 
-The registered `v1.1.0` model becomes a production API. Two processes: an OpenAI-compatible
+The registered `v1.0.0` model becomes a production API. Two processes: an OpenAI-compatible
 **inference engine** (vLLM on GPU, or llama.cpp on CPU) behind a thin **FastAPI gateway** that
 owns everything that is policy rather than inference.
 
@@ -163,7 +152,7 @@ owns everything that is policy rather than inference.
 
 ```bash
 make serve-test                        # 10 gateway tests, no GPU
-vllm serve vinmlops/domainbot-1.5b-rank32 --revision v1.1.0 --served-model-name domainbot --host 0.0.0.0 --port 8001
+vllm serve vinmlops/domainbot-1.5b-rank32 --revision v1.0.0 --served-model-name domainbot --port 8001
 make serve                             # gateway on :8000
 ```
 
@@ -208,16 +197,10 @@ kubectl apply -k k8s/                              # deploy the gateway
 kubectl -n domainbot port-forward svc/domainbot-gateway 8000:8000
 ```
 
-**Two keys, two doors:** `DOMAINBOT_API_KEY` guards the gateway (client → gateway);
-`DOMAINBOT_ENGINE_API_KEY` authenticates the gateway to the external endpoint (gateway → RunPod).
-`api_key_env` in `serving.yaml` must point at the *gateway's* key — crossing them makes the gateway
-demand the upstream key from clients (a real bug hit and fixed). In K8s, both keys come from the
-Secret, not `.env`.
-
-> **Verified end-to-end:** gateway on a kind cluster → RunPod Serverless vLLM (OpenAI `/openai/v1`)
-> → clean *"The capital of Japan is Tokyo."* Readiness correctly held traffic (0/1, no restart) when
-> the endpoint was unreachable. Swap `DOMAINBOT_ENGINE_URL` to move providers with zero code change.
-> This gateway-to-external-endpoint architecture is the standing setup for Days 6–10.
+> **The endpoint URL lives in a Secret, never in Git.** Swap `DOMAINBOT_ENGINE_URL` to move
+> between providers (or later to an in-cluster engine) with zero code change — the same
+> engine-swappable design from Day 4. This gateway-to-external-endpoint architecture is the
+> standing setup for Days 6–10.
 
 ## Day 6 — CI/CD: GitHub Actions + Argo CD (GitOps) + Terraform + Helm
 
@@ -239,23 +222,83 @@ push to main → CI: lint → test → build+push image(git-<sha>) → bump kust
   (ADR-018). No CI system holds cluster credentials.
 - **Terraform (`terraform/`)** — declaratively provisions the namespace + secrets (and, in a cloud
   setup, the cluster itself). Infra layer, separate from app deploy (ADR-019).
-- **Helm (`helm/domainbot/`)** — values-based packaging as an alternative to Kustomize.
+- **Helm (`helm/domainbot/`)** — values-based packaging as an alternative to Kustomize, for
+  per-environment overrides.
 
 ```bash
 make cicd-test                         # 8 config tests, no pipeline run
-kubectl apply -f argocd/application.yaml    # register the Argo app
+# install Argo CD, then:
+kubectl apply -f argocd/application.yaml
 git push                               # → CI builds → Argo deploys
 ```
 
 > **Deploy and rollback are ordinary Git operations** — auditable, reviewable, revertible. The
 > cluster state always equals what's in Git. This pipeline carries only the gateway; the model
-> endpoint is managed externally (Day 5), so retrains publish to the Hub and the gateway just
-> points at the new revision.
+> endpoint is managed externally (Day 5 architecture), so retrains publish to the Hub and the
+> gateway just points at the new revision.
 
-**GHCR gotcha (learned the hard way):** image references must be **lowercase** — a `vin-ML-dev`
-namespace fails to parse (`repository name must be lowercase`); GHCR stores it as `vin-ml-dev`. And
-the kustomization `images.name` must match the deployment image *exactly* (a one-character typo
-silently drops the tag → `InvalidImageName`). CI now lowercases the owner before tagging.
+## Day 7 — Redis caching + rate limiting + A/B (canary) routing
+
+A caching and control layer in front of the gateway. Same external-endpoint architecture;
+now identical prompts are cached, clients are rate-limited, and new model versions can be
+canaried on real traffic.
+
+```
+[user] → [gateway: cache? · rate-limit? · route A/B] → [external model endpoint]
+                       ↕
+                    [Redis]
+```
+
+- **Response cache (ADR-020)** — Redis, keyed by system prompt + messages + params + **model
+  revision**. Only caches **deterministic** (temperature 0) requests — identical input → identical
+  output, so a hit is correct by construction. A cache hit is ~1ms vs hundreds upstream, and cuts
+  the paid endpoint's bill. Fails **open**: Redis down → serve normally (a cache is never a hard dep).
+- **Rate limiting (ADR-021)** — fixed-window per-client quota in Redis; 429 when exceeded. Protects
+  the shared upstream budget from one noisy client. Also fails open.
+- **A/B canary routing (ADR-021)** — split a fraction of traffic to a new model version, with
+  **sticky per-client** assignment (a user stays on one variant during a rollout). Ramp
+  0→20→100 via one env var; roll back instantly by setting it to 0.
+
+```bash
+make cache-test                        # 11 logic tests, no Redis
+make redis-local                       # local Redis
+# then run the gateway with DOMAINBOT_REDIS_URL set and watch cache hits
+```
+
+> **All three controls are Redis-backed and fail-open.** The cache and rate limiter make the
+> gateway cheaper and safer without becoming a new single point of failure — if Redis dies, the
+> gateway degrades to "no cache, no limit" and keeps serving. Canary routing turns a model
+> upgrade into a gradual, instantly-reversible rollout instead of a risky big-bang switch.
+
+## Day 8 — Observability: Prometheus metrics + Grafana + alerts
+
+You can't improve what you can't see. Day 7 added caching, rate limiting, and canary routing;
+Day 8 makes them **measurable** — turning "I think the cache helps" into "cache hit ratio is 43%,
+p95 is 120ms."
+
+```
+[gateway /metrics] ──scrape──▶ [Prometheus] ──query──▶ [Grafana dashboards]
+                                     └──▶ alert rules (SLO breaches)
+```
+
+- **Metrics (`src/serving/metrics.py`, ADR-022)** — the **four golden signals** (latency, traffic,
+  errors, saturation) plus cache hit ratio, rate-limit rejections, tokens, and upstream health.
+  Everything is labeled by **variant (stable|canary)** so the canary is compared to stable directly.
+  Latency is a **histogram** (→ p50/p95/p99) — averages hide the tail; percentiles are what users feel.
+- **Prometheus** — scrapes each gateway pod's `/metrics` every 15s (pod discovery via RBAC).
+- **Grafana** — a pre-provisioned dashboard: request rate, p95 latency, error rate by status,
+  **cache hit ratio**, rate-limited/s, tokens/s, upstream up, upstream errors — all per variant.
+- **Alerts** — documented SLOs: >5% errors, p95>3s, upstream down, canary errors >10% (→ rollback).
+
+```bash
+make metrics-test                      # 4 tests, no cluster
+kubectl apply -k k8s/observability/    # Prometheus + Grafana + alerts
+make grafana                           # open the dashboard
+```
+
+> **This is what makes the canary safe.** With per-variant latency and error panels, you *see* the
+> canary's health next to stable and decide to ramp or roll back on data, not vibes. And the
+> cache-hit-ratio panel proves Day 7's value with a real production number, not a one-off curl timing.
 
 ## What I'd do differently at 100× scale
 
@@ -263,8 +306,6 @@ _(written Day 10)_
 
 ## Tech stack
 
-`Python` `HF datasets (streaming)` `DVC` `Presidio` `pydantic` `pytest` `ruff` `pre-commit`
-`PEFT/QLoRA` `TRL` `bitsandbytes` `MLflow` `Hugging Face Hub`
-`vLLM` `FastAPI` `Docker` `Kubernetes` `Kustomize` `Helm`
-`GitHub Actions` `GHCR` `Argo CD` `Terraform`
-_(growing daily: Redis, Prometheus, Grafana)_
+`Python` `HF datasets (streaming)` `DVC` `Presidio` `langdetect` `pydantic` `pytest` `ruff` `pre-commit`
+_(growing daily: PEFT/QLoRA, MLflow, vLLM, FastAPI, Docker, Kubernetes, Helm, Argo CD,
+Terraform, Redis, Prometheus, Grafana)_

@@ -28,9 +28,19 @@ from contextlib import asynccontextmanager
 import httpx
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from src.serving.cache import ResponseCache, cache_key, is_cacheable
+from src.serving.metrics import (
+    CACHE_EVENTS,
+    LATENCY,
+    RATE_LIMITED,
+    REQUESTS,
+    TOKENS,
+    UPSTREAM_ERRORS,
+    UPSTREAM_UP,
+)
 from src.serving.ratelimit import RateLimiter
 from src.serving.routing import pick_variant
 from src.serving.schemas import (
@@ -195,10 +205,20 @@ async def readyz():
     try:
         r = await app.state.client.get(url, headers=engine_headers(), timeout=3)
         if r.status_code == 200:
+            UPSTREAM_UP.set(1)
             return HealthResponse(status="ready")
+        UPSTREAM_UP.set(0)
         return JSONResponse(status_code=503, content={"status": "not_ready", "detail": f"engine {r.status_code}"})
     except Exception as e:  # noqa: BLE001
+        UPSTREAM_UP.set(0)
         return JSONResponse(status_code=503, content={"status": "not_ready", "detail": str(e)})
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus scrape endpoint. Returns all metrics in text exposition format.
+    Prometheus polls this every N seconds; Grafana queries Prometheus for dashboards."""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/v1/model-info", response_model=ModelInfo)
@@ -216,29 +236,30 @@ async def model_info():
 # --------------------------------------------------------------------------- chat
 @app.post("/v1/chat", response_model=ChatResponse, dependencies=[Depends(require_api_key)])
 async def chat(req: ChatRequest, request: Request):
+    start = time.perf_counter()
     validate_limits(req)
 
     # --- rate limit (Day 7): per-client quota, 429 when exceeded ---
     client_id = _client_id(request)
     allowed, remaining = await app.state.limiter.check(client_id)
     if not allowed:
+        RATE_LIMITED.inc()
+        REQUESTS.labels(route="/v1/chat", status="429", variant="none").inc()
         raise HTTPException(status_code=429, detail="rate limit exceeded") from None
 
     messages = build_messages(req.messages)
 
-    # streaming responses bypass the cache (they're consumed incrementally)
-    if req.stream:
-        url = CFG["model"]["engine_url"].rstrip("/") + "/chat/completions"
-        return StreamingResponse(
-            stream_chat(request, url, engine_payload(req, messages, stream=True)),
-            media_type="text/event-stream",
-        )
-
     # --- A/B routing (Day 7): sticky-per-client canary split ---
-    # pick the variant FIRST so the payload uses that variant's model name
     variant = pick_variant(client_id)
     engine_url, revision, model_name = _variant_upstream(variant)
     url = engine_url.rstrip("/") + "/chat/completions"
+
+    # streaming responses bypass the cache (they're consumed incrementally)
+    if req.stream:
+        return StreamingResponse(
+            stream_chat(request, url, engine_payload(req, messages, stream=True, model_name=model_name)),
+            media_type="text/event-stream",
+        )
 
     payload = engine_payload(req, messages, stream=False, model_name=model_name)
     temperature = payload["temperature"]
@@ -249,26 +270,44 @@ async def chat(req: ChatRequest, request: Request):
         ck = cache_key(messages, {k: payload[k] for k in ("max_tokens", "temperature", "top_p")}, revision)
         cached = await app.state.cache.get(ck)
         if cached is not None:
+            CACHE_EVENTS.labels(result="hit").inc()
+            REQUESTS.labels(route="/v1/chat", status="200", variant=variant).inc()
+            LATENCY.labels(route="/v1/chat", variant=variant).observe(time.perf_counter() - start)
             log_json(event="cache_hit", rid=request.state.rid, variant=variant)
             return ChatResponse(**cached)
+        CACHE_EVENTS.labels(result="miss").inc()
 
     try:
         r = await app.state.client.post(url, json=payload, headers=engine_headers())
     except httpx.TimeoutException:
+        UPSTREAM_ERRORS.labels(kind="timeout").inc()
+        REQUESTS.labels(route="/v1/chat", status="504", variant=variant).inc()
         raise HTTPException(status_code=504, detail="engine timeout") from None
     except httpx.ConnectError:
+        UPSTREAM_ERRORS.labels(kind="unavailable").inc()
+        REQUESTS.labels(route="/v1/chat", status="503", variant=variant).inc()
         raise HTTPException(status_code=503, detail="engine unavailable") from None
     if r.status_code != 200:
+        UPSTREAM_ERRORS.labels(kind="error").inc()
+        REQUESTS.labels(route="/v1/chat", status="502", variant=variant).inc()
         raise HTTPException(status_code=502, detail=f"engine error {r.status_code}") from None
 
     data = r.json()
     choice = data["choices"][0]["message"]["content"]
+    usage = data.get("usage", {})
     result = ChatResponse(
         content=choice,
         model=CFG["model"]["repo_id"],
         revision=revision,
-        usage=data.get("usage", {}),
+        usage=usage,
     )
+
+    # --- metrics: success, latency, tokens ---
+    REQUESTS.labels(route="/v1/chat", status="200", variant=variant).inc()
+    LATENCY.labels(route="/v1/chat", variant=variant).observe(time.perf_counter() - start)
+    if usage:
+        TOKENS.labels(kind="prompt", variant=variant).inc(usage.get("prompt_tokens", 0))
+        TOKENS.labels(kind="completion", variant=variant).inc(usage.get("completion_tokens", 0))
 
     # --- cache store (Day 7) ---
     if ck is not None:
@@ -289,8 +328,8 @@ def _client_id(request: Request) -> str:
 
 def _variant_upstream(variant: str) -> tuple[str, str, str]:
     """Return (engine_url, revision, model_name) for the chosen A/B variant.
-    Each variant can serve under a different model name (the endpoint may be strict
-    about the 'model' field). Canary uses separate env vars; falls back to stable."""
+    Each variant can serve under a different model name. Canary uses separate env
+    vars; falls back to stable if unset."""
     if variant == "canary":
         url = os.getenv("DOMAINBOT_CANARY_ENGINE_URL", CFG["model"]["engine_url"])
         rev = os.getenv("DOMAINBOT_CANARY_REVISION", CFG["model"]["revision"])

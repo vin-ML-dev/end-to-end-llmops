@@ -1,0 +1,49 @@
+# Alert rules. In a full setup these feed Alertmanager -> Slack/PagerDuty.
+# Here they document the SLOs and show what you'd page on.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-alerts
+  namespace: domainbot
+data:
+  alerts.yml: |
+    groups:
+      - name: domainbot
+        rules:
+          # ERRORS: >5% of requests failing over 5m
+          - alert: HighErrorRate
+            expr: |
+              sum(rate(domainbot_requests_total{status=~"5.."}[5m]))
+              / sum(rate(domainbot_requests_total[5m])) > 0.05
+            for: 5m
+            labels: { severity: critical }
+            annotations:
+              summary: "Gateway error rate above 5%"
+
+          # LATENCY: p95 over 3s for 10m
+          - alert: HighLatencyP95
+            expr: |
+              histogram_quantile(0.95,
+                sum(rate(domainbot_request_duration_seconds_bucket[5m])) by (le)) > 3
+            for: 10m
+            labels: { severity: warning }
+            annotations:
+              summary: "p95 latency above 3s"
+
+          # SATURATION: upstream endpoint unreachable
+          - alert: UpstreamDown
+            expr: domainbot_upstream_up == 0
+            for: 2m
+            labels: { severity: critical }
+            annotations:
+              summary: "Model endpoint unreachable (readiness failing)"
+
+          # CANARY: canary error rate materially worse than stable
+          - alert: CanaryErrorsHigh
+            expr: |
+              sum(rate(domainbot_requests_total{status=~"5..",variant="canary"}[5m]))
+              / sum(rate(domainbot_requests_total{variant="canary"}[5m])) > 0.10
+            for: 5m
+            labels: { severity: warning }
+            annotations:
+              summary: "Canary error rate above 10% — consider rollback"

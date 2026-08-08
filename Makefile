@@ -102,3 +102,16 @@ cache-test:  ## test cache/ratelimit/routing logic (no Redis)
 
 redis-local:  ## run a local Redis for dev
 	docker run --rm -p 6379:6379 redis:7-alpine
+
+# --- Day 8: observability ---
+metrics-test:  ## test the /metrics endpoint + instrumentation
+	pytest tests/test_metrics.py -v
+
+observability-deploy:  ## deploy Prometheus + Grafana into the cluster
+	kubectl apply -k k8s/observability/
+
+grafana:  ## open Grafana (admin/admin)
+	kubectl -n domainbot port-forward svc/grafana 3000:3000
+
+prometheus:  ## open Prometheus
+	kubectl -n domainbot port-forward svc/prometheus 9090:9090

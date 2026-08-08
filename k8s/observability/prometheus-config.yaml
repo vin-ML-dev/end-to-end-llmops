@@ -1,0 +1,27 @@
+# Prometheus scrape config. It polls each gateway pod's /metrics endpoint every
+# 15s and stores the time series. Grafana then queries Prometheus for dashboards.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: domainbot
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+      - job_name: domainbot-gateway
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [domainbot]
+        relabel_configs:
+          # only scrape gateway pods
+          - source_labels: [__meta_kubernetes_pod_label_component]
+            regex: gateway
+            action: keep
+          # scrape port 8000 /metrics
+          - source_labels: [__meta_kubernetes_pod_ip]
+            target_label: __address__
+            replacement: ${1}:8000
+        metrics_path: /metrics
