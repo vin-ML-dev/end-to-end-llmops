@@ -273,8 +273,8 @@ make redis-local                       # local Redis
 ## Day 8 — Observability: Prometheus metrics + Grafana + alerts
 
 You can't improve what you can't see. Day 7 added caching, rate limiting, and canary routing;
-Day 8 makes them **measurable** — turning "I think the cache helps" into "cache hit ratio is 43%,
-p95 is 120ms."
+Day 8 makes them **measurable** — turning "I think the cache helps" into "cache hit ratio hit 100%
+on repeated prompts and p95 latency dropped from ~4.5s to near-zero."
 
 ```
 [gateway /metrics] ──scrape──▶ [Prometheus] ──query──▶ [Grafana dashboards]
@@ -296,9 +296,39 @@ kubectl apply -k k8s/observability/    # Prometheus + Grafana + alerts
 make grafana                           # open the dashboard
 ```
 
+### The dashboard (live traffic across stable + canary)
+
+![Golden signals: request rate, latency, errors, cache hit ratio](docs/images/day8-dashboard-golden-signals.png)
+
+The four golden signals, split by variant. Three things worth reading off this panel:
+
+- **Request Rate** shows *both* `stable` (blue) and `canary` (green) receiving traffic — the 50/50
+  split routing correctly, with `none` (yellow) marking pre-routing rejections (rate-limited requests).
+- **Latency (p95)** shows the **cache effect as a cliff**: requests start at ~4.5s (real upstream calls),
+  then drop to **near-zero** the moment identical prompts start hitting cache. That vertical fall *is*
+  the cache doing its job, made visible.
+- **Cache Hit Ratio** climbs to **100%** during the repeated-prompt window — every request served from
+  Redis, zero upstream cost. This is the Day 7 optimization proven with a production number, not a
+  one-off `curl` timing.
+- **Error Rate** stays flat at zero — no failures under load.
+
+![Rate limiting, tokens, upstream health](docs/images/day8-dashboard-cache-canary.png)
+
+The control-plane and health panels:
+
+- **Rate-Limited (429/s)** spikes exactly when a single client bursts past its per-minute quota —
+  the limiter protecting the shared upstream budget, caught on the graph.
+- **Tokens/s by Variant** tracks prompt vs completion tokens for *both* stable and canary — the basis
+  for cost attribution and capacity planning, per model version.
+- **Upstream Up** holds flat at `1` — the external endpoint stayed reachable throughout.
+- **Upstream Errors** reads **"No data"** — which is the *healthy* state: no timeouts, no connection
+  failures, nothing to plot.
+
 > **This is what makes the canary safe.** With per-variant latency and error panels, you *see* the
-> canary's health next to stable and decide to ramp or roll back on data, not vibes. And the
-> cache-hit-ratio panel proves Day 7's value with a real production number, not a one-off curl timing.
+> canary's health next to stable and decide to ramp or roll back on data, not vibes. The cache-hit
+> and latency panels turn Day 7's work into evidence: a measured **100% hit ratio** and a visible
+> **latency collapse** from seconds to milliseconds. Metrics are the difference between "I think it
+> works" and "here is the graph."
 
 ## What I'd do differently at 100× scale
 
