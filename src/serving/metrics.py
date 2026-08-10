@@ -64,3 +64,18 @@ UPSTREAM_UP = Gauge(
     "domainbot_upstream_up",
     "1 if the model endpoint passed the last readiness check, else 0",
 )
+
+
+# --- GUARDRAILS: blocks by stage + reason (Day 9) ---
+GUARDRAIL_BLOCKS = Counter(
+    "domainbot_guardrail_blocks_total",
+    "Requests/responses blocked by guardrails",
+    ["stage", "reason"],  # stage = input|output
+)
+
+# --- RAG: retrievals + whether context was found (Day 9) ---
+RAG_RETRIEVALS = Counter(
+    "domainbot_rag_retrievals_total",
+    "RAG retrieval attempts",
+    ["result"],  # result = hit|empty
+)
