@@ -1,0 +1,8 @@
+{"id": "kb-1", "text": "DomainBot is a production LLMOps platform built on Qwen2.5-1.5B-Instruct, fine-tuned with QLoRA and served through a FastAPI gateway on Kubernetes."}
+{"id": "kb-2", "text": "The DomainBot quality gate blocks a model from shipping unless it passes three conditions: an absolute floor of 80 percent, no regression against the deployed model, and no per-category collapse below 50 percent."}
+{"id": "kb-3", "text": "Incident INC-013 was a PII over-scrubbing bug: the training pipeline replaced locations and dates with placeholders like LOCATION, which the model then emitted in answers. The fix scrubbed only email, phone, credit card, and SSN."}
+{"id": "kb-4", "text": "DomainBot caches deterministic responses in Redis. Only temperature-zero requests are cached, and the cache key includes the model revision so a new version never serves an old version's answers."}
+{"id": "kb-5", "text": "The canary rollout splits traffic by a configurable percentage with sticky per-client assignment. Rolling back is instant: set the canary percentage to zero."}
+{"id": "kb-6", "text": "DomainBot retrains always from the base model on old plus new data, never from the deployed model, to avoid compounding drift across generations."}
+{"id": "kb-7", "text": "The gateway enforces two API keys: one authenticates clients to the gateway, and a separate key authenticates the gateway to the external model endpoint."}
+{"id": "kb-8", "text": "Observability uses Prometheus and Grafana. The four golden signals are latency, traffic, errors, and saturation. Latency is tracked as a histogram so p95 and p99 can be computed."}

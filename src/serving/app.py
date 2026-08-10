@@ -32,15 +32,19 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from src.serving.cache import ResponseCache, cache_key, is_cacheable
+from src.serving.guardrails import check_input, check_output
 from src.serving.metrics import (
     CACHE_EVENTS,
+    GUARDRAIL_BLOCKS,
     LATENCY,
+    RAG_RETRIEVALS,
     RATE_LIMITED,
     REQUESTS,
     TOKENS,
     UPSTREAM_ERRORS,
     UPSTREAM_UP,
 )
+from src.serving.rag import Retriever, build_context
 from src.serving.ratelimit import RateLimiter
 from src.serving.routing import pick_variant
 from src.serving.schemas import (
@@ -104,6 +108,10 @@ async def lifespan(app: FastAPI):
     app.state.cache = ResponseCache(app.state.redis)
     app.state.limiter = RateLimiter(app.state.redis)
 
+    # RAG retriever (Day 9): loads the knowledge base once at startup.
+    app.state.retriever = Retriever()
+    log_json(event="rag_loaded", chunks=len(app.state.retriever.chunks))
+
     log_json(event="startup", model=CFG["model"]["repo_id"], revision=CFG["model"]["revision"])
     yield
     await app.state.client.aclose()
@@ -146,7 +154,7 @@ async def add_request_id(request: Request, call_next):
 
 
 # --------------------------------------------------------------------------- helpers
-def build_messages(user_messages: list) -> list[dict]:
+def build_messages(user_messages: list, extra_system: str = "") -> list[dict]:
     """Prepend the server-side system prompt; enforce history cap.
 
     The system prompt lives here, not in the client request. This mirrors training
@@ -155,7 +163,11 @@ def build_messages(user_messages: list) -> list[dict]:
     """
     limits = CFG["limits"]
     trimmed = user_messages[-(limits["max_history_turns"] * 2) :]  # ~turns * (user+assistant)
-    out = [{"role": "system", "content": CFG["server"]["system_prompt"].strip()}]
+    system = CFG["server"]["system_prompt"].strip()
+    if extra_system:
+        # RAG context is appended to the system prompt so the model grounds its answer.
+        system = system + "\n\n" + extra_system
+    out = [{"role": "system", "content": system}]
     out += [{"role": m.role, "content": m.content} for m in trimmed]
     return out
 
@@ -247,7 +259,23 @@ async def chat(req: ChatRequest, request: Request):
         REQUESTS.labels(route="/v1/chat", status="429", variant="none").inc()
         raise HTTPException(status_code=429, detail="rate limit exceeded") from None
 
-    messages = build_messages(req.messages)
+    # --- input guardrail (Day 9): block injection / PII BEFORE calling the model ---
+    last_user = req.messages[-1].content if req.messages else ""
+    ok_in, reason_in = check_input(last_user)
+    if not ok_in:
+        GUARDRAIL_BLOCKS.labels(stage="input", reason=reason_in).inc()
+        REQUESTS.labels(route="/v1/chat", status="400", variant="none").inc()
+        log_json(event="guardrail_block", stage="input", reason=reason_in, rid=request.state.rid)
+        raise HTTPException(status_code=400, detail=f"request blocked: {reason_in}") from None
+
+    # --- RAG (Day 9): retrieve context from the knowledge base, ground the answer ---
+    rag_context = ""
+    if os.getenv("DOMAINBOT_RAG_ENABLED", "true").lower() == "true":
+        hits = app.state.retriever.retrieve(last_user)
+        RAG_RETRIEVALS.labels(result="hit" if hits else "empty").inc()
+        rag_context = build_context(hits)
+
+    messages = build_messages(req.messages, extra_system=rag_context)
 
     # --- A/B routing (Day 7): sticky-per-client canary split ---
     variant = pick_variant(client_id)
@@ -295,6 +323,16 @@ async def chat(req: ChatRequest, request: Request):
     data = r.json()
     choice = data["choices"][0]["message"]["content"]
     usage = data.get("usage", {})
+
+    # --- output guardrail (Day 9): block banned content BEFORE returning ---
+    # INC-013 regression guard: a <LOCATION>-style placeholder must never ship.
+    ok_out, reason_out = check_output(choice)
+    if not ok_out:
+        GUARDRAIL_BLOCKS.labels(stage="output", reason=reason_out).inc()
+        REQUESTS.labels(route="/v1/chat", status="502", variant=variant).inc()
+        log_json(event="guardrail_block", stage="output", reason=reason_out, rid=request.state.rid)
+        raise HTTPException(status_code=502, detail="response blocked by output guardrail") from None
+
     result = ChatResponse(
         content=choice,
         model=CFG["model"]["repo_id"],

@@ -115,3 +115,7 @@ grafana:  ## open Grafana (admin/admin)
 
 prometheus:  ## open Prometheus
 	kubectl -n domainbot port-forward svc/prometheus 9090:9090
+
+# --- Day 9: RAG + guardrails ---
+rag-test:  ## test RAG retrieval + input/output guardrails
+	pytest tests/test_rag_guardrails.py -v
