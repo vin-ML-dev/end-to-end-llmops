@@ -24,6 +24,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
 COPY src/serving/ ./src/serving/
 COPY src/__init__.py ./src/__init__.py
 COPY configs/serving.yaml ./configs/serving.yaml
+COPY docs/knowledge_base.jsonl ./docs/knowledge_base.jsonl
 USER appuser
 EXPOSE 8000
 # liveness baked into the image
