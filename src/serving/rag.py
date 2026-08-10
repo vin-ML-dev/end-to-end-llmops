@@ -98,7 +98,12 @@ def build_context(chunks: list[dict]) -> str:
     Unchanged from the baseline — instructs the model to answer ONLY from context."""
     if not chunks:
         return ""
-    lines = ["Use ONLY the following context to answer. If the answer is not in it, say you don't know.\n"]
+    # lines = ["Use ONLY the following context to answer. If the answer is not in it, say you don't know.\n"]
+    lines = [
+        "You are answering a technical question. Use ONLY the facts in the context below. "
+        "Do not add analogies, explanations, or details not explicitly stated. "
+        "Answer concisely and professionally. If a detail isn't in the context, say it's not available.\n"
+    ]
     for i, c in enumerate(chunks, 1):
         lines.append(f"[{i}] {c['text']}")
     return "\n".join(lines)
