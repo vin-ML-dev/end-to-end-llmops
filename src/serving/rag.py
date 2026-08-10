@@ -102,7 +102,7 @@ def build_context(chunks: list[dict]) -> str:
     lines = [
         "You are answering a technical question. Use ONLY the facts in the context below. "
         "Do not add analogies, explanations, or details not explicitly stated. "
-        "Answer concisely and professionally. If a detail isn't in the context, say it's not available.\n"
+        "Answer concisely and professionally. If a detail isn't in the context, say you don't know..\n"
     ]
     for i, c in enumerate(chunks, 1):
         lines.append(f"[{i}] {c['text']}")
