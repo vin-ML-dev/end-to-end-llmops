@@ -24,7 +24,7 @@ lint:  ## lint + format
 clean:  ## remove interim artifacts and caches
 	rm -rf data/interim/* .pytest_cache .ruff_cache
 
-# --- Day 2: training (run on a GPU box) ---
+# --- Training (GPU) ---
 train-setup:  ## install GPU training deps
 	pip install -r requirements-train.txt
 
@@ -37,7 +37,7 @@ mlflow-ui:  ## open the MLflow UI on the local run store
 compare:  ## compare tracked runs
 	MLFLOW_TRACKING_URI=file:outputs/mlruns python -m src.training.compare_runs
 
-# --- Day 3: evaluation, gate, registry ---
+# --- Evaluation & gate ---
 gate:  ## run the golden-fact gate against the model in configs/eval.yaml
 	python -m src.evaluation.gate --config configs/eval.yaml
 
@@ -47,7 +47,7 @@ gate-test:  ## prove the gate blocks (unit tests, no GPU)
 register:  ## register an approved model (usage: make register VERSION=v1.0.0)
 	python -m src.evaluation.register --config configs/eval.yaml --version $(VERSION)
 
-# --- Day 4: serving (gateway) ---
+# --- Serving ---
 serve-setup:  ## install gateway deps
 	pip install -r requirements-serve.txt
 
@@ -65,7 +65,7 @@ docker-run:  ## run the gateway container
 	  -e DOMAINBOT_ENGINE_URL=http://host.docker.internal:8001/v1 \
 	  domainbot-gateway:local
 
-# --- Day 5: Kubernetes ---
+# --- Kubernetes ---
 k8s-validate:  ## validate manifests without a cluster
 	pytest tests/test_k8s_manifests.py -v
 	kubectl apply -k k8s/ --dry-run=client >/dev/null && echo "kustomize OK"
@@ -82,7 +82,7 @@ k8s-rollback:  ## undo last gateway rollout
 k8s-logs:  ## tail gateway logs
 	kubectl -n domainbot logs -l component=gateway -f
 
-# --- Day 6: CI/CD ---
+# --- CI/CD ---
 cicd-test:  ## validate CI/CD + GitOps config (no pipeline run)
 	pytest tests/test_cicd.py -v
 
@@ -96,14 +96,14 @@ argocd-apply:  ## register the Argo CD application (Argo must be installed)
 tf-plan:  ## preview Terraform infra changes
 	cd terraform && terraform init && terraform plan
 
-# --- Day 7: caching + rate limiting + A/B ---
+# --- Caching, rate limiting, A/B routing ---
 cache-test:  ## test cache/ratelimit/routing logic (no Redis)
 	pytest tests/test_caching_routing.py -v
 
 redis-local:  ## run a local Redis for dev
 	docker run --rm -p 6379:6379 redis:7-alpine
 
-# --- Day 8: observability ---
+# --- Observability ---
 metrics-test:  ## test the /metrics endpoint + instrumentation
 	pytest tests/test_metrics.py -v
 
@@ -116,6 +116,16 @@ grafana:  ## open Grafana (admin/admin)
 prometheus:  ## open Prometheus
 	kubectl -n domainbot port-forward svc/prometheus 9090:9090
 
-# --- Day 9: RAG + guardrails ---
+# --- RAG & guardrails ---
 rag-test:  ## test RAG retrieval + input/output guardrails
 	pytest tests/test_rag_guardrails.py -v
+
+# --- Orchestration ---
+pipeline-test:  ## test the orchestrator + drift monitor (no GPU)
+	pytest tests/test_pipeline.py -v
+
+pipeline-plan:  ## dry-run the full retrain->gate->register->deploy pipeline
+	python -m src.pipelines.retrain_pipeline --version v1.2.0 --dry-run
+
+drift-check:  ## run the drift monitor against sample signals
+	python -m src.monitoring.drift_monitor 2>/dev/null || echo "import-only module; see tests"

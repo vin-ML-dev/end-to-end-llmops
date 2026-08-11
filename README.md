@@ -1,375 +1,160 @@
 # DomainBot — Production LLMOps Platform
 
-> Fine-tune → gate → serve → deploy → observe → retrain.
-> A complete LLM lifecycle on Kubernetes with CI/CD, caching, A/B rollout,
-> observability, and automated retraining.
+A complete, self-hosted lifecycle for a fine-tuned LLM: **curate data → fine-tune → gate → serve → deploy → observe → retrain**. Everything runs behind a thin FastAPI gateway on Kubernetes, ships through GitOps CI/CD, and is guarded by an evaluation gate that can block a bad model from ever reaching production.
 
-**Status:** ✅ Complete — 10-day production LLMOps lifecycle (data → fine-tune → gate → serve → deploy → CI/CD → cache/canary → observe → RAG/guardrails → orchestrated retrain)
-**Dataset:** [`Open-Orca/OpenOrca`](https://huggingface.co/datasets/Open-Orca/OpenOrca) — ~4.2M GPT-3.5/GPT-4 instruction pairs over FLAN prompts (MIT)
+Built around a QLoRA fine-tune of `Qwen2.5-1.5B-Instruct`, but the model is incidental — the point is the **infrastructure and the discipline around it**: reproducible data, a blocking quality gate, versioned releases, canary rollouts, caching, observability, retrieval, safety guardrails, and an automated retrain loop.
+
+```
+                         ┌──────────────── retrain loop ─────────────────┐
+                         │                                               │
+  data pipeline → QLoRA fine-tune → evaluation gate → registry (Hub) → deploy (GitOps)
+   curate/scrub/split      MLflow      block if fails      vX.Y.Z         Argo CD
+                                                                            │
+                                                                            ▼
+                           ┌─────────────── Kubernetes ───────────────┐
+   client ──▶  FastAPI gateway  ──HTTP──▶  external model endpoint (managed vLLM)
+               auth · limits · cache · A/B routing · RAG · guardrails
+                    │                    ▲
+                 Redis                Prometheus ──▶ Grafana + alerts
+```
+
+---
+
+## Why this exists
+
+Most LLM demos stop at "it generates text." Production is the other 90%: proving a model is good enough to ship, shipping it without downtime, catching it when it regresses, serving it cheaply, and updating it safely. This project is that 90%, built end to end and small enough to run on a laptop (the gateway) plus a rented GPU (training).
+
+The design decisions are documented as [ADRs](DECISIONS.md) and the failures as [incidents](INCIDENTS.md) — because in real MLOps, the interesting part is the tradeoffs and the things that broke.
 
 ---
 
 ## Architecture
 
-_(diagram lands Day 5)_
+**Gateway / engine split.** The model runs on an external, OpenAI-compatible endpoint (managed vLLM); Kubernetes runs only a stateless FastAPI **gateway** that owns everything that is *policy* rather than *inference* — auth, validation, the server-side system prompt, caching, rate limiting, A/B routing, retrieval, guardrails, health, and logging. The engine is swappable (vLLM ↔ llama.cpp) with zero client changes, and the model version is a single config value.
 
-```
-OpenOrca (stream) → quality filters → PII scrub → dedup → chat format → train/val/test
-                          ↓                                                    ↓
-                  curation_report.json                            (Day 2: QLoRA fine-tune)
-```
+**Why external inference.** GPUs are expensive and spiky; a managed endpoint owns scheduling and scaling. The gateway is CPU-only and autoscales cheaply. This is a common, cost-effective production pattern — and it keeps the gateway image tiny (code only, no weights).
+
+**GitOps everywhere.** Deploys are Git commits. CI builds and pushes the gateway image, writes the new tag into the manifests, and Argo CD syncs the cluster. Rollback is `git revert`. No CI system holds cluster credentials.
+
+---
+
+## The through-line: one real bug, defended in depth
+
+Early on, an over-aggressive PII scrub replaced locations and dates in the training data with placeholders like `<LOCATION>`. The fine-tuned model learned to emit them — answering "the capital of `<LOCATION>` is Tokyo." This one bug (tracked as INC-013) shows up as a design constraint across the whole stack:
+
+1. **Data** — the scrub was corrected to touch only genuinely sensitive PII (email, phone, card, SSN), never locations or dates.
+2. **Gate** — the golden set permanently bans placeholder tokens, so any model that regresses is blocked before release.
+3. **Serving** — an output guardrail refuses to return a response containing those tokens, even if a future model regressed past the gate.
+
+Three independent layers, so shipping a `<LOCATION>` answer is mechanically impossible. That defense-in-depth mindset — assume any single control can fail — runs through the whole project.
+
+---
+
+## Capabilities
+
+### Data pipeline
+Streams [OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca), applies quality filters (refusals, truncation, question-echo, repetition, language, length, dedup), scrubs sensitive PII, converts to chat format, and produces stratified train/val/test splits plus a curation report. Versioned with DVC. Deliberately includes **honesty examples** so the model learns to say "I don't know" — a counterweight to instruction data that always answers.
+
+### Fine-tuning
+QLoRA (4-bit NF4 base + LoRA adapters, ~1–3% of params trainable) tracked in MLflow with data-version and git-SHA lineage. Compute dtype is auto-detected (bf16 on Ampere+, fp16 on T4) — hardcoding it is a classic portability crash. Only adapters are saved; merging happens at release.
+
+### Evaluation gate
+A **blocking** gate, not a report. It runs a frozen golden set and exits non-zero — halting CI or the retrain pipeline — unless the model clears three conditions: an absolute pass-rate floor, no regression against the currently deployed model, and no per-category collapse (averages hide slice failures). The golden set is never edited to make a model pass; it only grows as production bugs are found. The `must_not_contain` rules make it a standing regression suite.
+
+### Serving
+FastAPI gateway with Pydantic validation as the security boundary, a server-side system prompt clients cannot override (a prompt-injection defense), SSE streaming, API-key auth, and proper health semantics — `/healthz` for liveness (process up) versus `/readyz` for readiness (pings the model endpoint; fail = stop routing, don't restart). Errors map cleanly: upstream timeout → 504, endpoint down → 503, endpoint error → 502.
+
+### Kubernetes
+Gateway-only deployment with liveness/readiness probes, an HPA (2→10 on load), and a PodDisruptionBudget. If the endpoint goes down, pods go NotReady but aren't restarted — correct handling of an upstream outage rather than a crash loop.
+
+### CI/CD
+GitHub Actions runs lint + tests + manifest validation, then builds and pushes `ghcr.io/…/domainbot-gateway:git-<sha>`. **Tests gate the build** — untested code can't ship. Argo CD pulls desired state from Git; `selfHeal` reverts drift, `prune` removes deleted resources. Terraform provisions the namespace and secrets; Helm offers a values-based packaging alternative to Kustomize.
+
+### Caching, rate limiting, A/B routing
+A Redis layer in front of the endpoint. The response cache keys on system prompt + messages + params + **model revision**, and only caches deterministic (temperature-0) requests, so a hit is correct by construction — and turns a multi-second upstream call into a ~1ms lookup. A per-client fixed-window rate limiter protects the shared endpoint budget. Canary routing splits a configurable fraction of traffic to a new model version with sticky per-client assignment; ramp 0→100 via one value, roll back instantly to 0. **All three fail open** — if Redis dies, the gateway degrades to "no cache, no limit" and keeps serving.
+
+### Observability
+Prometheus scrapes the gateway; Grafana visualizes the four golden signals (latency as a histogram → p50/p95/p99, traffic, errors, saturation) plus cache hit ratio, rate-limit rejections, tokens, and upstream health — every metric labeled by variant so stable and canary are compared directly. Alert rules encode the SLOs (error rate, p95, upstream down, canary error rate → rollback).
+
+![Golden signals — request rate, latency, errors, cache hit ratio, split by variant](docs/images/dashboard-golden-signals.png)
+
+The latency panel shows the cache as a **cliff**: requests start at multi-second upstream latency, then drop to near-zero the moment identical prompts start hitting cache. The cache-hit-ratio panel climbs to 100% on repeated prompts — the caching payoff as a live production number, not a one-off benchmark.
+
+![Rate limiting, tokens, and upstream health](docs/images/dashboard-cache-canary.png)
+
+Rate-limiting spikes exactly when a client bursts past its quota; tokens are tracked per variant for cost attribution; upstream health holds at 1; the upstream-errors panel reads "no data" — the healthy state.
+
+### Retrieval (RAG)
+LangChain + FAISS with OpenAI embeddings ground answers in a knowledge base without retraining. Retrieval separates **knowledge** (documents, edited anytime) from the **model** (retrained rarely) — facts change far more often than weights should. The retriever sits behind a clean interface, so swapping OpenAI embeddings for a local model or a managed vector DB is a one-file change. Embeddings-as-API keeps the image small and mirrors the external-inference pattern.
+
+### Guardrails
+The gateway is the trust boundary. An input guard runs *before* the model, blocking prompt-injection and PII we won't forward to a third party (a blocked request never incurs upstream cost). An output guard runs *after* the model, refusing to return banned content. Cheap deterministic rules form the fast first line; a heavier classifier can sit behind them.
+
+### Orchestration
+A single pipeline chains retrain → gate → register → deploy → verify, halting at the first failure — the gate is the hard stop, so a bad model cannot reach deploy. It *composes* the real stage entrypoints rather than reimplementing them, so each stays independently runnable. A drift monitor reads the signals already collected (golden pass rate, error/latency, new-data volume, unknown-topic rate) and decides *when* to retrain — urgent on a regression, routine on enough new data. Deploy is a GitOps commit, so every rollout is auditable and revertible.
+
+---
 
 ## Quickstart
 
 ```bash
-make setup                      # deps + hooks + spaCy model
-make data                       # dvc repro — streams OpenOrca and builds the dataset
-SOURCE_MODE=sample make data    # offline: use the bundled sample, no network needed
-make test
+make setup                        # deps + hooks
+make test                         # full suite (no GPU, no cluster)
+
+# data pipeline (streams OpenOrca; sample mode needs no network)
+SOURCE_MODE=sample make data
+
+# serving locally (point the gateway at any OpenAI-compatible endpoint)
+make serve
+
+# kubernetes
+kubectl apply -k k8s/             # gateway + redis
+kubectl apply -k k8s/observability/   # prometheus + grafana
+
+# the retrain pipeline (dry-run plan; the retrain stage runs on GPU infra)
+make pipeline-plan
 ```
 
-## Why OpenOrca
-
-It is **machine-generated at scale**, which makes it a realistic curation exercise:
-refusals, truncated completions, question echoes, repetition loops and template
-artifacts all appear in the raw stream. That is the point — the filtering work here
-is the same work you'd do on production logs.
-
-Its `id` prefixes (`flan.`, `t0.`, `niv.`, `cot.`) are the FLAN submixes, which we
-use as **stratification categories** so every split contains every task family.
-
-## Results (sample mode, 24 rows)
-
-| Metric | Value |
-|---|---|
-| Raw rows ingested | 24 |
-| After curation | 13 (**54% survival**) |
-| Removed | refusal 1 · truncated 1 · question-echo 1 · repetition 2 · all-caps 1 · non-English 1 · length 2 · exact-dup 2 |
-| PII scrubbed | 1 record (EMAIL, CARD, IP) |
-| Chat examples built | 17 (13 curated + 4 honesty) |
-| Train / val / test | 7 / 5 / 5 |
-| Golden set (frozen) | 22 cases |
-
-> Run against real OpenOrca (`max_docs: 5000`) and expect a different mix —
-> read `data/interim/curation_report.json` and tune thresholds from it, not by guessing.
-
-## Dataset design notes
-
-- **Chat format** (`system`/`user`/`assistant`) so TRL's `SFTTrainer` applies the
-  model's own chat template — the same template must be applied at inference (Day 4).
-- **One standardized system prompt**, not OpenOrca's dozens (ADR-005): a product has
-  one persona, and Day 4 injects it server-side so clients cannot override it.
-- **Honesty examples** teach the model to say "I don't know". OpenOrca trains it to
-  always answer; without a counterweight a fine-tune confidently invents facts.
-- **Golden set is frozen** — never trained on, never edited to make a model pass,
-  only ever grows as production bugs are found.
-
-## Docs
-
-- [Decisions (ADRs)](DECISIONS.md) — why each tool was chosen, and the tradeoffs
-- [Incidents](INCIDENTS.md) — failures, root causes, preventions
-- [Runbook](RUNBOOK.md) · [Costs](COSTS.md) · [Day 1 notes](docs/theory-day1.md)
-- [COMMANDS.txt](COMMANDS.txt) — every command for Day 1, in order
-
-
+Training runs on a GPU box (Colab / Kaggle / RunPod); everything else runs on a laptop.
 
 ---
 
-## Day 2 — QLoRA fine-tuning + MLflow
+## Testing
 
-Fine-tune `Qwen2.5-0.5B-Instruct` on the Day 1 dataset using **QLoRA** (4-bit NF4
-base + LoRA adapters, ~1-3% of params trainable), tracked in **MLflow**.
-
-- `configs/train.yaml` — every hyperparameter; run experiments by editing this, not code
-- `src/training/train.py` — 4-bit load → LoRA → SFT → early stopping → save adapter + sample generations → log to MLflow with **data-version + git-SHA lineage**
-- `src/training/compare_runs.py` — comparison table across runs
-
-Run (on a GPU box):
-```bash
-make train-setup
-MLFLOW_TRACKING_URI=file:outputs/mlruns python -m src.training.train --run-name baseline
-make mlflow-ui        # http://localhost:5000
-```
-
-**Three deliberate experiments** (simulating future retrains): baseline · more epochs +
-lower LR · higher LoRA rank. Winner chosen by eval_loss **and** a read of
-`sample_generations.json` — eval_loss alone never tells you if answers are actually good.
-
-| Run | eval_loss | notes |
-|---|---|---|
-| baseline | _fill in_ | |
-| more_epochs | _fill in_ | |
-| rank32 | _fill in_ | |
-
-> Compute dtype is auto-detected: **bf16** on Ampere+ (RTX 30xx/A100), **fp16** on T4.
-> Hardcoding it is the #1 QLoRA portability crash (INC-008).
-
-
-## Day 3 — Evaluation, quality gate, regression suite, registry
-
-The heart of production ML: a gate that can **block a bad model from shipping**.
-
-- `src/evaluation/evaluate.py` — pure scoring logic (GPU-free, unit-tested): each golden case
-  passes iff a `must_contain` pattern matches AND no `must_not_contain` pattern does. The
-  `must_not_contain` bans make it a **regression suite** — every past hallucination stays banned.
-- `src/evaluation/gate.py` — loads the model, runs all golden cases, applies the gate, and
-  **exits non-zero if blocked** (so CI / the retrain pipeline halts). Three conditions, all required:
-  1. absolute floor (≥80% pass)
-  2. ≥ the currently-deployed model (no regressions)
-  3. no per-category collapse (averages hide slice failures)
-- `src/evaluation/register.py` — re-runs the gate, then tags the HF repo `v1.0.0` and updates
-  the model card. Refuses to register an unapproved model.
+The full suite runs without a GPU or a cluster — gate logic, serving, manifests, caching/routing, metrics, RAG/guardrails, and the orchestration pipeline are all unit-tested against fakes.
 
 ```bash
-make gate-test                         # prove the gate BLOCKS (10 tests, no GPU)
-make gate                              # run it against your model (GPU)
-make register VERSION=v1.0.0           # register only if it passed
+make test          # everything
+make gate-test     # prove the gate BLOCKS a bad model
+make cache-test    # cache + rate-limit + routing logic
+make rag-test      # retrieval + input/output guardrails
 ```
 
-> **The gate caught a real bug.** The Day 2 PII over-scrubbing (INC-013) means the model emits
-> `<LOCATION>` placeholders on some fact questions — so the gate blocks those cases. That is the
-> gate doing its job: a defect found mechanically, not by luck. Fix = correct the data, retrain,
-> re-gate. The golden set is never edited to force a pass.
+---
 
+## What I'd change at 100× scale
 
-## Day 4 — Serving: vLLM + FastAPI gateway + Docker
+The architecture holds; each component becomes its own managed, scaled service:
 
-The registered `v1.0.0` model becomes a production API. Two processes: an OpenAI-compatible
-**inference engine** (vLLM on GPU, or llama.cpp on CPU) behind a thin **FastAPI gateway** that
-owns everything that is policy rather than inference.
+- **Inference** on an autoscaling managed GPU fleet (KServe / Ray Serve) with request batching; the gateway stays thin.
+- **Retrieval** backed by a persistent vector DB (pgvector / Qdrant / Pinecone), with indexing as an **offline pipeline** that runs on document change — never at pod startup — and an index version folded into the cache key.
+- **Orchestration** on a real DAG engine (Argo Workflows / Airflow) for retries, artifact lineage, and parallel eval.
+- **Continuous evaluation** — log and sample production traffic, grow the golden set from real failures, and feed the drift monitor real signals instead of fixed thresholds.
+- **Progressive delivery** — canary ramps automatically on SLO metrics and auto-rolls-back on breach (Argo Rollouts / Flagger), wiring the canary-error alert to an action rather than a human.
+- **Cost as a first-class metric** — token spend and GPU-hours on the dashboard with budgets and alerts.
+- **Governance** — per-tenant keys and quotas, retained model cards and eval reports per version, signed images with provenance.
 
-```
-[client] → [FastAPI gateway :8000] → [vLLM / llama.cpp engine :8001]
-             auth · limits · system-prompt · health · errors      inference
-```
-
-- `src/serving/app.py` — the gateway: Pydantic validation, **server-side system prompt**,
-  prompt-injection defense (**client `role: system` is rejected**), SSE streaming, API-key auth,
-  `/healthz` (liveness) vs `/readyz` (readiness — pings the engine), `/v1/model-info` (verify
-  rollouts), and error mapping (timeout→504, engine down→503, engine error→502).
-- `src/serving/schemas.py` — request/response models; the validation *is* the security boundary.
-- `Dockerfile` — multi-stage, slim, **non-root**, `HEALTHCHECK`; **no weights baked in**.
-
-```bash
-make serve-test                        # 10 gateway tests, no GPU
-vllm serve vinmlops/domainbot-1.5b-rank32 --revision v1.0.0 --served-model-name domainbot --port 8001
-make serve                             # gateway on :8000
-```
-
-**Two design decisions carry the day:**
-- **Gateway in front of the engine (ADR-012)** — the engine does inference; it doesn't know your
-  auth, limits, persona, or health semantics. Keeping those in a thin gateway makes the engine
-  swappable (vLLM ↔ llama.cpp) with zero client changes.
-- **Pull weights at a pinned revision, never bake them (ADR-013)** — the image stays tiny (code
-  only), and the model version is switchable by one env var (`DOMAINBOT_REVISION`) with no rebuild
-  — the basis for Day 5 rollback. "Same tag, new weights" is a silent prod killer, so pin.
-
-> The **server-side system prompt + `apply_chat_template`** here is the same one used in training
-> (Day 2) — inference must mirror training. And a client cannot override it: `role: system` from a
-> client is rejected (422), closing a prompt-injection vector.
-
-## Day 5 — Kubernetes (gateway-only) → external model endpoint
-
-The model runs on an **external cloud platform**; we have only its API endpoint. Kubernetes runs
-**only the FastAPI gateway**, which calls out to that endpoint and returns responses to users.
-No GPU, no engine, in our cluster — a common, cost-effective production pattern (managed inference).
-
-```
-[user] → [K8s: FastAPI gateway] ──HTTP──▶ [external cloud model endpoint /v1]
-              probes · auth · limits            (managed vLLM — we just call it)
-```
-
-- **Gateway-only in K8s (ADR-016)** — the platform owns GPU scheduling, weights, and engine
-  scaling; we own auth, validation, the system prompt, limits, health, and logging. The gateway
-  forwards an optional Bearer token upstream, so it works with managed APIs that require auth.
-- **Probes** — `livenessProbe → /healthz` (process; fail = restart); `readinessProbe → /readyz`
-  (pings the **external endpoint**; fail = stop routing traffic, no restart). If the endpoint is
-  down, pods go NotReady but aren't restarted — correct handling of an upstream outage.
-- **HPA** autoscales the (CPU-only) gateway 2→10 on load. **PDB** keeps ≥1 during disruptions.
-- **Rollback** — `rollout undo` for gateway code; a ConfigMap change for the reported model version.
-
-```bash
-make k8s-validate                                  # 9 manifest tests, no cluster
-kubectl -n domainbot create secret generic domainbot-secrets \
-  --from-literal=DOMAINBOT_ENGINE_URL="https://your-endpoint/v1" \
-  --from-literal=DOMAINBOT_API_KEY="$(openssl rand -hex 16)" --dry-run=client -o yaml | kubectl apply -f -
-kubectl apply -k k8s/                              # deploy the gateway
-kubectl -n domainbot port-forward svc/domainbot-gateway 8000:8000
-```
-
-> **The endpoint URL lives in a Secret, never in Git.** Swap `DOMAINBOT_ENGINE_URL` to move
-> between providers (or later to an in-cluster engine) with zero code change — the same
-> engine-swappable design from Day 4. This gateway-to-external-endpoint architecture is the
-> standing setup for Days 6–10.
-
-## Day 6 — CI/CD: GitHub Actions + Argo CD (GitOps) + Terraform + Helm
-
-Every push to main is tested, built, and rolled out automatically. Deploy = merge;
-rollback = `git revert`. The gateway ships through the pipeline; the model stays external.
-
-```
-push to main → CI: lint → test → build+push image(git-<sha>) → bump kustomization.yaml
-                                                                       ↓ (git commit)
-                                              Argo CD (in-cluster) detects → syncs cluster
-```
-
-- **CI (`.github/workflows/ci.yaml`)** — lint (ruff) + pytest + validate k8s manifests, then
-  build and push `ghcr.io/.../domainbot-gateway:git-<sha>`. **Tests gate the build**
-  (`build-push needs: test`) — untested code can never ship (ADR-017).
-- **GitOps (Argo CD, `argocd/application.yaml`)** — the cluster *pulls* desired state from Git.
-  CI writes the new image tag into `k8s/kustomization.yaml`; Argo detects the commit and syncs.
-  `selfHeal` reverts manual drift; `prune` removes deleted resources. Rollback = `git revert`
-  (ADR-018). No CI system holds cluster credentials.
-- **Terraform (`terraform/`)** — declaratively provisions the namespace + secrets (and, in a cloud
-  setup, the cluster itself). Infra layer, separate from app deploy (ADR-019).
-- **Helm (`helm/domainbot/`)** — values-based packaging as an alternative to Kustomize, for
-  per-environment overrides.
-
-```bash
-make cicd-test                         # 8 config tests, no pipeline run
-# install Argo CD, then:
-kubectl apply -f argocd/application.yaml
-git push                               # → CI builds → Argo deploys
-```
-
-> **Deploy and rollback are ordinary Git operations** — auditable, reviewable, revertible. The
-> cluster state always equals what's in Git. This pipeline carries only the gateway; the model
-> endpoint is managed externally (Day 5 architecture), so retrains publish to the Hub and the
-> gateway just points at the new revision.
-
-## Day 7 — Redis caching + rate limiting + A/B (canary) routing
-
-A caching and control layer in front of the gateway. Same external-endpoint architecture;
-now identical prompts are cached, clients are rate-limited, and new model versions can be
-canaried on real traffic.
-
-```
-[user] → [gateway: cache? · rate-limit? · route A/B] → [external model endpoint]
-                       ↕
-                    [Redis]
-```
-
-- **Response cache (ADR-020)** — Redis, keyed by system prompt + messages + params + **model
-  revision**. Only caches **deterministic** (temperature 0) requests — identical input → identical
-  output, so a hit is correct by construction. A cache hit is ~1ms vs hundreds upstream, and cuts
-  the paid endpoint's bill. Fails **open**: Redis down → serve normally (a cache is never a hard dep).
-- **Rate limiting (ADR-021)** — fixed-window per-client quota in Redis; 429 when exceeded. Protects
-  the shared upstream budget from one noisy client. Also fails open.
-- **A/B canary routing (ADR-021)** — split a fraction of traffic to a new model version, with
-  **sticky per-client** assignment (a user stays on one variant during a rollout). Ramp
-  0→20→100 via one env var; roll back instantly by setting it to 0.
-
-```bash
-make cache-test                        # 11 logic tests, no Redis
-make redis-local                       # local Redis
-# then run the gateway with DOMAINBOT_REDIS_URL set and watch cache hits
-```
-
-> **All three controls are Redis-backed and fail-open.** The cache and rate limiter make the
-> gateway cheaper and safer without becoming a new single point of failure — if Redis dies, the
-> gateway degrades to "no cache, no limit" and keeps serving. Canary routing turns a model
-> upgrade into a gradual, instantly-reversible rollout instead of a risky big-bang switch.
-
-## Day 8 — Observability: Prometheus metrics + Grafana + alerts
-
-You can't improve what you can't see. Day 7 added caching, rate limiting, and canary routing;
-Day 8 makes them **measurable** — turning "I think the cache helps" into "cache hit ratio is 43%,
-p95 is 120ms."
-
-```
-[gateway /metrics] ──scrape──▶ [Prometheus] ──query──▶ [Grafana dashboards]
-                                     └──▶ alert rules (SLO breaches)
-```
-
-- **Metrics (`src/serving/metrics.py`, ADR-022)** — the **four golden signals** (latency, traffic,
-  errors, saturation) plus cache hit ratio, rate-limit rejections, tokens, and upstream health.
-  Everything is labeled by **variant (stable|canary)** so the canary is compared to stable directly.
-  Latency is a **histogram** (→ p50/p95/p99) — averages hide the tail; percentiles are what users feel.
-- **Prometheus** — scrapes each gateway pod's `/metrics` every 15s (pod discovery via RBAC).
-- **Grafana** — a pre-provisioned dashboard: request rate, p95 latency, error rate by status,
-  **cache hit ratio**, rate-limited/s, tokens/s, upstream up, upstream errors — all per variant.
-- **Alerts** — documented SLOs: >5% errors, p95>3s, upstream down, canary errors >10% (→ rollback).
-
-```bash
-make metrics-test                      # 4 tests, no cluster
-kubectl apply -k k8s/observability/    # Prometheus + Grafana + alerts
-make grafana                           # open the dashboard
-```
-
-> **This is what makes the canary safe.** With per-variant latency and error panels, you *see* the
-> canary's health next to stable and decide to ramp or roll back on data, not vibes. And the
-> cache-hit-ratio panel proves Day 7's value with a real production number, not a one-off curl timing.
-
-## Day 10 — Orchestration + lifecycle (capstone)
-
-Days 1–9 built every stage; Day 10 runs them as **one self-updating loop**. A drift monitor decides
-*when* to retrain; an orchestrated pipeline runs retrain → gate → register → deploy safely, with the
-gate as a hard stop. The Day 3 doctrine, now automated.
-
-```
-[drift monitor] --retrain?--> [PIPELINE: retrain(from BASE) → gate → register → deploy(GitOps) → verify]
-   golden pass rate,                              |            |          |
-   error/latency (Day 8),                     HARD STOP    refuses     Argo
-   new-data volume,                           if fails    if !gated    syncs
-   unknown-topic rate (Day 9)
-```
-
-- **Pipeline (`src/pipelines/retrain_pipeline.py`, ADR-025)** — chains the stages, halting at the
-  first failure (non-zero exit). It **composes** the real entrypoints (train/gate/register) rather
-  than reimplementing them, so each stage stays independently runnable. Retrain is always **from the
-  base model on old+new data**, never from the deployed model. The **gate fails the pipeline** — a
-  bad model cannot reach register or deploy, and the gate is never loosened to pass a wrong answer.
-  Deploy is a **GitOps commit** (Day 6), so every rollout is reviewable and revertible.
-- **Drift monitor (`src/monitoring/drift_monitor.py`)** — reads the signals already collected
-  (golden-set pass rate, Day 8 error/latency, new-data volume, Day 9 unknown-topic rate) and emits
-  one decision: retrain or not, and why. Urgent (a regression) vs routine (enough new data). It can
-  page a human or trigger the pipeline. Conservative by design — retraining is expensive and gated.
-- **Scheduled workflow (`.github/workflows/retrain.yaml`)** — weekly + manual trigger.
-
-```bash
-make pipeline-test                     # 8 tests, no GPU
-make pipeline-plan                     # dry-run the full 5-stage pipeline
-```
-
-> **This is the whole course, closed into a loop.** Every earlier day is a link: Day 1 data, Day 2/3
-> retrain+gate, Day 6 GitOps deploy, Day 7 canary ramp, Day 8 metrics that feed the drift monitor,
-> Day 9 RAG signals. Day 10 is the chain — a model that monitors itself, retrains when it should, and
-> can only ship if it passes the same gate that has guarded quality since Day 3.
-
-## What I'd do differently at 100× scale
-
-This project is deliberately a single-model, single-cluster teaching build. At 100× the traffic,
-data, and team, these are the changes I'd make — and why:
-
-- **Managed inference + autoscaling GPUs.** Keep the gateway/engine split (ADR-012), but run the
-  engine on a managed, autoscaling GPU fleet (KServe / Ray Serve / a vendor endpoint) with
-  request batching. The gateway stays thin; the expensive, spiky part scales independently.
-- **A real vector database, index built offline.** Replace in-memory FAISS with a persistent,
-  shared vector DB (pgvector / Qdrant / Pinecone). Indexing becomes an **offline data pipeline**
-  (chunk → embed → upsert) that runs on document change — never at pod startup. Version the index
-  like the model; include the index version in the cache key so a KB update invalidates stale hits.
-- **Orchestrate with a real DAG engine.** Move the Day 10 pipeline into Argo Workflows / Airflow for
-  per-stage retries, artifact lineage, and parallel eval — the logic is identical, just expressed as
-  a managed DAG with observability per stage.
-- **Feature/eval store + continuous evaluation.** Log every prod request/response, sample and label
-  it, and grow the golden set continuously. Run evals on a schedule, not just at retrain — the drift
-  monitor gets real signals instead of thresholds I guessed.
-- **Distributed caching + multi-region.** Redis becomes a clustered/managed cache; the gateway runs
-  multi-region behind a load balancer, with the cache and rate-limiter partitioned per region.
-- **Progressive delivery, automated.** The Day 7 canary becomes automated progressive rollout
-  (Argo Rollouts / Flagger) that ramps on the Day 8 SLO metrics and auto-rolls-back on a breach —
-  the `CanaryErrorsHigh` alert wired to an action, not a human.
-- **Cost as a first-class metric.** Token spend, GPU-hours, and cache savings on the dashboard, with
-  budgets and alerts — at 100× scale, cost regressions matter as much as latency regressions.
-- **Security + governance.** Per-tenant keys and quotas, PII handling audited end-to-end, model
-  cards and eval reports retained per version for compliance, and signed images with provenance.
-
-The **architecture doesn't change** — gateway in front, model external, gate before ship, GitOps
-deploy, metrics everywhere. What changes is that each component becomes its own managed, scaled,
-independently-owned service. The principles from these ten days are what make that scale-up safe.
-
+---
 ## Tech stack
 
-`Python` `HF datasets (streaming)` `DVC` `Presidio` `langdetect` `pydantic` `pytest` `ruff` `pre-commit`
-_(growing daily: PEFT/QLoRA, MLflow, vLLM, FastAPI, Docker, Kubernetes, Helm, Argo CD,
-Terraform, Redis, Prometheus, Grafana)_
+**Data & training** — Python, Hugging Face Datasets, DVC, Presidio, PEFT/QLoRA, TRL, bitsandbytes, Transformers, PyTorch, MLflow, Hugging Face Hub
+
+**Serving & infra** — FastAPI, Pydantic, httpx, Uvicorn, Docker, Kubernetes, Kustomize, Helm, Redis
+
+**Delivery** — GitHub Actions, GHCR, Argo CD, Terraform
+
+**Observability** — Prometheus, Grafana
+
+**Retrieval** — LangChain, FAISS, OpenAI embeddings
+
+**Quality** — pytest, ruff, pre-commit
