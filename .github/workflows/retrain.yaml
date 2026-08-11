@@ -1,0 +1,28 @@
+# Scheduled + manual retrain pipeline. Runs the drift monitor; if it says "retrain",
+# runs retrain -> gate -> register -> deploy. The gate halts the job on a bad model.
+name: retrain-pipeline
+on:
+  schedule:
+    - cron: "0 3 * * 1"        # weekly, Monday 03:00 UTC
+  workflow_dispatch:            # manual trigger with a version
+    inputs:
+      version:
+        description: "target version tag (e.g. v1.2.0)"
+        required: true
+        default: "v1.2.0"
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      # a real run would need a GPU runner for the retrain stage; the gate/register
+      # stages and the dry-run plan work on CPU. Shown as the intended shape.
+      - name: run pipeline (dry-run plan on CI; real run on a GPU runner)
+        run: |
+          python -m src.pipelines.retrain_pipeline \
+            --version "${{ github.event.inputs.version || 'v1.2.0' }}" \
+            --dry-run

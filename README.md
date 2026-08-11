@@ -4,7 +4,7 @@
 > A complete LLM lifecycle on Kubernetes with CI/CD, caching, A/B rollout,
 > observability, and automated retraining.
 
-**Status:** 🚧 Day 9/10 — RAG (retrieval) + input/output guardrails
+**Status:** ✅ Complete — 10-day production LLMOps lifecycle (data → fine-tune → gate → serve → deploy → CI/CD → cache/canary → observe → RAG/guardrails → orchestrated retrain)
 **Dataset:** [`Open-Orca/OpenOrca`](https://huggingface.co/datasets/Open-Orca/OpenOrca) — ~4.2M GPT-3.5/GPT-4 instruction pairs over FLAN prompts (MIT)
 
 ---
@@ -300,9 +300,73 @@ make grafana                           # open the dashboard
 > canary's health next to stable and decide to ramp or roll back on data, not vibes. And the
 > cache-hit-ratio panel proves Day 7's value with a real production number, not a one-off curl timing.
 
+## Day 10 — Orchestration + lifecycle (capstone)
+
+Days 1–9 built every stage; Day 10 runs them as **one self-updating loop**. A drift monitor decides
+*when* to retrain; an orchestrated pipeline runs retrain → gate → register → deploy safely, with the
+gate as a hard stop. The Day 3 doctrine, now automated.
+
+```
+[drift monitor] --retrain?--> [PIPELINE: retrain(from BASE) → gate → register → deploy(GitOps) → verify]
+   golden pass rate,                              |            |          |
+   error/latency (Day 8),                     HARD STOP    refuses     Argo
+   new-data volume,                           if fails    if !gated    syncs
+   unknown-topic rate (Day 9)
+```
+
+- **Pipeline (`src/pipelines/retrain_pipeline.py`, ADR-025)** — chains the stages, halting at the
+  first failure (non-zero exit). It **composes** the real entrypoints (train/gate/register) rather
+  than reimplementing them, so each stage stays independently runnable. Retrain is always **from the
+  base model on old+new data**, never from the deployed model. The **gate fails the pipeline** — a
+  bad model cannot reach register or deploy, and the gate is never loosened to pass a wrong answer.
+  Deploy is a **GitOps commit** (Day 6), so every rollout is reviewable and revertible.
+- **Drift monitor (`src/monitoring/drift_monitor.py`)** — reads the signals already collected
+  (golden-set pass rate, Day 8 error/latency, new-data volume, Day 9 unknown-topic rate) and emits
+  one decision: retrain or not, and why. Urgent (a regression) vs routine (enough new data). It can
+  page a human or trigger the pipeline. Conservative by design — retraining is expensive and gated.
+- **Scheduled workflow (`.github/workflows/retrain.yaml`)** — weekly + manual trigger.
+
+```bash
+make pipeline-test                     # 8 tests, no GPU
+make pipeline-plan                     # dry-run the full 5-stage pipeline
+```
+
+> **This is the whole course, closed into a loop.** Every earlier day is a link: Day 1 data, Day 2/3
+> retrain+gate, Day 6 GitOps deploy, Day 7 canary ramp, Day 8 metrics that feed the drift monitor,
+> Day 9 RAG signals. Day 10 is the chain — a model that monitors itself, retrains when it should, and
+> can only ship if it passes the same gate that has guarded quality since Day 3.
+
 ## What I'd do differently at 100× scale
 
-_(written Day 10)_
+This project is deliberately a single-model, single-cluster teaching build. At 100× the traffic,
+data, and team, these are the changes I'd make — and why:
+
+- **Managed inference + autoscaling GPUs.** Keep the gateway/engine split (ADR-012), but run the
+  engine on a managed, autoscaling GPU fleet (KServe / Ray Serve / a vendor endpoint) with
+  request batching. The gateway stays thin; the expensive, spiky part scales independently.
+- **A real vector database, index built offline.** Replace in-memory FAISS with a persistent,
+  shared vector DB (pgvector / Qdrant / Pinecone). Indexing becomes an **offline data pipeline**
+  (chunk → embed → upsert) that runs on document change — never at pod startup. Version the index
+  like the model; include the index version in the cache key so a KB update invalidates stale hits.
+- **Orchestrate with a real DAG engine.** Move the Day 10 pipeline into Argo Workflows / Airflow for
+  per-stage retries, artifact lineage, and parallel eval — the logic is identical, just expressed as
+  a managed DAG with observability per stage.
+- **Feature/eval store + continuous evaluation.** Log every prod request/response, sample and label
+  it, and grow the golden set continuously. Run evals on a schedule, not just at retrain — the drift
+  monitor gets real signals instead of thresholds I guessed.
+- **Distributed caching + multi-region.** Redis becomes a clustered/managed cache; the gateway runs
+  multi-region behind a load balancer, with the cache and rate-limiter partitioned per region.
+- **Progressive delivery, automated.** The Day 7 canary becomes automated progressive rollout
+  (Argo Rollouts / Flagger) that ramps on the Day 8 SLO metrics and auto-rolls-back on a breach —
+  the `CanaryErrorsHigh` alert wired to an action, not a human.
+- **Cost as a first-class metric.** Token spend, GPU-hours, and cache savings on the dashboard, with
+  budgets and alerts — at 100× scale, cost regressions matter as much as latency regressions.
+- **Security + governance.** Per-tenant keys and quotas, PII handling audited end-to-end, model
+  cards and eval reports retained per version for compliance, and signed images with provenance.
+
+The **architecture doesn't change** — gateway in front, model external, gate before ship, GitOps
+deploy, metrics everywhere. What changes is that each component becomes its own managed, scaled,
+independently-owned service. The principles from these ten days are what make that scale-up safe.
 
 ## Tech stack
 
