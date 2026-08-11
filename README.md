@@ -23,9 +23,6 @@ Built around a QLoRA fine-tune of `Qwen2.5-1.5B-Instruct`, but the model is inci
 ## Why this exists
 
 Most LLM demos stop at "it generates text." Production is the other 90%: proving a model is good enough to ship, shipping it without downtime, catching it when it regresses, serving it cheaply, and updating it safely. This project is that 90%, built end to end and small enough to run on a laptop (the gateway) plus a rented GPU (training).
-
-The design decisions are documented as [ADRs](DECISIONS.md) and the failures as [incidents](INCIDENTS.md) — because in real MLOps, the interesting part is the tradeoffs and the things that broke.
-
 ---
 
 ## Architecture
